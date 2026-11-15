@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/lib/server/auth";
 import { handleApiError, jsonError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
+import { itemCustomization } from "@/lib/server/orders";
 import { podAutoSubmit, podMode, webhookSecret } from "@/lib/pod/config";
 import { attachDesignPages, attachPrintFile, cancelFulfillment, confirmDraft, prepareFulfillments, readArtwork, readIssues, refreshReadiness, resetPrintFile, submitFulfillment, syncFulfillment, syncStaleFulfillments } from "@/lib/pod/fulfillment";
 import { podAdapter } from "@/lib/pod/providers";
@@ -85,7 +86,7 @@ export async function GET(request: NextRequest) {
           ...item,
           tracking,
           latestEvent: latestEvent(tracking),
-          items: item.items.map(({ personalization, ...line }) => ({ ...line, shipping: shipping.get(line.id) ?? null, podArtwork: readArtwork(line.podArtwork), podIssues: readIssues(line.podIssues), card: savedCard(personalization), ...savedPhotos(personalization) })),
+          items: item.items.map(({ personalization, ...line }) => { const design = itemCustomization(personalization); return { ...line, shipping: shipping.get(line.id) ?? null, podArtwork: readArtwork(line.podArtwork), podIssues: readIssues(line.podIssues), card: savedCard(personalization), ...savedPhotos(personalization), preview: design.preview, detail: design.detail, options: design.options }; }),
         };
       }),
     });
