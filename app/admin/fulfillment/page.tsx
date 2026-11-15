@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AdminPageHeader, AdminShell } from "@/components/admin";
+import { OptionChips, Thumb } from "@/components/admin-ui";
 import { BrandLoader } from "@/components/loading";
 import { Price, Spinner, StatusBadge, Toast } from "@/components/site";
 import { podProviderLabel, POD_PROVIDER_LABELS, type PodProvider } from "@/lib/products";
@@ -10,7 +11,7 @@ import type { CardCustomization } from "@/lib/store";
 type Issue = { code: string; severity: "blocker" | "warning" | "info"; message: string };
 type Reference = { label: string; side?: string; url: string; width?: number; height?: number };
 type Slot = { unit: number; productRef: string | null; area: string; url: string | null; source: "design" | "customer" | "admin" | null; kind?: "photo" | "pages" | "admin" | "calendar"; description?: string; width?: number; height?: number; format?: string; fit?: "fill" | "pad" | "aspect" | "original"; original?: string | null; verified?: { width: number; height: number } | null; references?: Reference[]; pages?: number };
-type Item = { id: string; name: string; quantity: number; podProductRef: string | null; podArtwork: Slot[]; podIssues: Issue[]; card: CardCustomization | null; kind: string | null; photos: (string | null)[]; shipping: { state: "pending" | "shipped" | "delivered"; shipmentIds: string[] } | null };
+type Item = { id: string; name: string; quantity: number; podProductRef: string | null; podArtwork: Slot[]; podIssues: Issue[]; card: CardCustomization | null; kind: string | null; photos: (string | null)[]; preview: string | null; detail: string | null; options: { name: string; value: string }[]; shipping: { state: "pending" | "shipped" | "delivered"; shipmentIds: string[] } | null };
 type TrackingEvent = { at: string | null; description: string; location: string | null };
 type Shipment = { id: string; carrier: string | null; service: string | null; trackingNumber: string | null; trackingUrl: string | null; status: string; shippedAt: string | null; deliveredAt: string | null; estimatedDelivery: { from: string | null; to: string | null } | null; location: string | null; items: { itemId: string | null; sku?: string | null; quantity: number | null }[]; events: TrackingEvent[] };
 type Tracking = { shipments: Shipment[]; estimatedDelivery: { from: string | null; to: string | null } | null; expectedDispatch: string | null; history?: TrackingEvent[] };
@@ -58,6 +59,8 @@ export default function AdminFulfillmentPage() {
     }
   }, [provider, status, query]);
   useEffect(() => { void load(); }, [load]);
+  // Opened from an order (/admin/fulfillment?q=CM-…): show that order's print orders.
+  useEffect(() => { const given = new URLSearchParams(window.location.search).get("q"); if (given) setQuery(given.slice(0, 120)); }, []);
 
   const act = async (label: string, payload: Record<string, unknown>, success: string) => {
     setBusy(label);
@@ -170,6 +173,7 @@ function Detail({ item, mode, busy, onClose, act, onToast }: { item: Fulfillment
       {item.items.map((line) => <div key={line.id} className="mt-3 rounded-2xl border border-[#e4e7ee] p-4">
         <p className="text-sm font-black">{line.quantity} × {line.name}</p>
         <p className="mt-0.5 break-all text-[11px] text-[#9297a4]">Shop product: {line.podProductRef || "not mapped"}{line.shipping && item.tracking.shipments.length > 0 && <> · <span className="font-black text-[#182443]">{line.shipping.state === "delivered" ? "Delivered" : line.shipping.state === "shipped" ? "Shipped" : "Not shipped yet"}</span></>}</p>
+        <CustomerDesign item={line} />
         {line.podIssues.map((issue, index) => <p key={index} className={`mt-2 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ${issue.severity === "blocker" ? "bg-[#fff0e8] text-[#c94758]" : issue.severity === "warning" ? "bg-[#fff6e0] text-[#8a5a00]" : "bg-[#f3f4f6] text-[#59627b]"}`}>{issue.severity === "blocker" ? "Blocks sending: " : issue.severity === "warning" ? "Held — check: " : "Note (sent automatically): "}{issue.message}</p>)}
         {line.podArtwork.length > 0 && !line.podArtwork.some((slot) => slot.original || slot.references?.length) && <CustomerPhotos item={line} />}
         {line.podArtwork.filter((slot) => slot.kind !== "calendar").map((slot, index) => <ArtworkSlot key={index} slot={slot} item={line} editable={["NEEDS_ATTENTION", "READY", "FAILED"].includes(item.status)} busy={busy} act={act} onToast={onToast} />)}
@@ -202,21 +206,18 @@ function Shipments({ tracking, items }: { tracking: Tracking; items: Item[] }) {
   </>;
 }
 
-// Small preview of a Cloudinary image (print files can be very large); other links as they are.
-function previewUrl(url: string) {
-  return url.replace(/^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)/, "$1c_limit,w_480,h_480,f_auto,q_auto/");
-}
-
-function Thumb({ url, label, detail }: { url: string; label: string; detail?: string }) {
-  const pdf = /\.pdf($|\?)/i.test(url);
-  return <a href={url} target="_blank" rel="noreferrer" className="group block min-w-0" title="Open the full file">
-    <span className="flex h-36 items-center justify-center overflow-hidden rounded-lg border border-[#e4e7ee] bg-[repeating-conic-gradient(#f3f4f6_0_25%,#fff_0_50%)] bg-[length:16px_16px]">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      {pdf ? <span className="text-xs font-black text-[#59627b]">PDF</span> : <img src={previewUrl(url)} alt={label} className="max-h-full max-w-full object-contain" />}
-    </span>
-    <span className="mt-1 block font-black text-[#182443] group-hover:text-[#ee5264]">{label}</span>
-    {detail && <span className="block text-[#9297a4]">{detail}</span>}
-  </a>;
+// The customer's design as the product studio showed it (mug, case, magnets…) and the choices made, saved
+// with the order. Reference only: the print shop gets the print files below.
+function CustomerDesign({ item }: { item: Item }) {
+  if (!item.preview && !item.options.length && !item.detail) return null;
+  return <div className="mt-3 grid gap-3 rounded-xl bg-[#fafbfc] p-3 text-[11px] sm:grid-cols-[160px_1fr]">
+    {item.preview ? <Thumb url={item.preview} label="Customer's design" detail="as shown in the studio — reference only" /> : <span className="flex h-36 items-center justify-center rounded-lg border border-dashed border-[#e4e7ee] text-center font-bold text-[#9297a4]">No design preview saved</span>}
+    <div className="min-w-0">
+      <p className="font-black">What the customer chose</p>
+      {item.detail && <p className="mt-1 text-[#59627b]">{item.detail}</p>}
+      <div className="mt-2"><OptionChips options={item.options} /></div>
+    </div>
+  </div>;
 }
 
 const SOURCE_LABEL: Record<string, string> = { design: "made from the customer's design", admin: "attached by admin", customer: "link to the customer's photo — not checked" };

@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/server/auth";
 import { handleApiError, jsonError } from "@/lib/server/http";
-import { serializeOrder } from "@/lib/server/orders";
+import { itemCustomization, itemProvider, serializeOrder } from "@/lib/server/orders";
 import { prisma } from "@/lib/server/prisma";
-import { cancelFulfillment, syncStaleFulfillments } from "@/lib/pod/fulfillment";
+import { cancelFulfillment, readArtwork, syncStaleFulfillments } from "@/lib/pod/fulfillment";
 import { podProviderLabel } from "@/lib/products";
 
 export const dynamic = "force-dynamic";
@@ -24,11 +24,30 @@ export async function GET() {
     return NextResponse.json({
       orders: orders.map(({ _count: _ignored, ...order }) => {
         const prints = fulfillments.filter((item) => item.orderId === order.id);
+        // Every item with what the customer designed and the print files made for its print shop.
+        const items = order.items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          quantity: item.quantity,
+          unitPrice: item.unitPriceCents / 100,
+          provider: itemProvider(item),
+          productRef: item.podProductRef,
+          ...itemCustomization(item.personalization),
+          printFiles: readArtwork(item.podArtwork).flatMap((slot) => (slot.url ? [{ url: slot.url, area: slot.area, unit: slot.unit, kind: slot.kind ?? null, source: slot.source }] : [])),
+        }));
+        const billing = order.billingAddress && typeof order.billingAddress === "object" && !Array.isArray(order.billingAddress) ? order.billingAddress as Record<string, unknown> : null;
         return {
           // With its print orders: the stage, every parcel's tracking and the delivery estimate.
           ...serializeOrder({ ...order, fulfillments: prints }),
           payment: order.payments[0] ? { provider: order.payments[0].provider, status: order.payments[0].status } : null,
           fulfillments: prints.map(({ orderId: _orderId, tracking: _tracking, ...item }) => item),
+          totals: { subtotal: order.subtotalCents / 100, shipping: order.shippingCents / 100, discount: order.discountCents / 100, total: order.totalCents / 100, currency: order.currency },
+          // The customer account the order belongs to (guest checkouts have none). Never the password hash.
+          customer: order.customer ? { name: order.customer.name, email: order.customer.email, phone: order.customer.phone } : null,
+          billingAddress: billing,
+          items,
+          // The print shops of the order: its print orders, else where its items will be sent.
+          providers: Array.from(new Set([...prints.map((item) => item.provider), ...items.map((item) => item.provider)].filter((value): value is NonNullable<typeof value> => Boolean(value)))),
         };
       }),
     });

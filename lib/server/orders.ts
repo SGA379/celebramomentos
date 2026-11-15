@@ -3,9 +3,53 @@ import { STAGE_LABEL, orderStage } from "@/lib/order-progress";
 import { podMode } from "@/lib/pod/config";
 import { readTracking } from "@/lib/pod/tracking";
 import type { PodMode } from "@/lib/pod/types";
+import { podProviderFor } from "@/lib/products";
 
 const asObject = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const httpsUrl = (value: unknown) => (typeof value === "string" && /^https:\/\//.test(value) ? value : null);
+const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+// What the customer designed, as saved with the order item at checkout (OrderItem.personalization), for the
+// admin pages: the studio preview, the choices made (size, colour, model…), the uploaded photos in order
+// (a calendar keeps an empty month as null) and, for cards, the pages rendered at checkout. Only https links
+// are returned. Reference only: what is sent to the print shop is the item's print files (podArtwork).
+export type ItemCustomization = {
+  kind: string | null;
+  preview: string | null;
+  detail: string | null;
+  options: { name: string; value: string }[];
+  photos: (string | null)[];
+  pages: { side: string; url: string }[];
+  cardSize: string | null;
+};
+
+export function itemCustomization(personalization: unknown): ItemCustomization {
+  const data = asObject(personalization);
+  const product = asObject(data.product);
+  const catalog = product.kind === "CATALOG";
+  const card = asObject(data.card);
+  const panels = asObject(card.design).panels;
+  return {
+    kind: catalog ? text(product.productKind) : Object.keys(card).length ? "POSTCARD" : null,
+    preview: itemPreview(personalization),
+    detail: catalog ? text(product.detail) : null,
+    options: catalog ? Object.entries(asObject(product.options)).flatMap(([name, value]) => (text(value) ? [{ name, value: text(value)! }] : [])) : [],
+    photos: catalog && Array.isArray(product.photos) ? product.photos.map(httpsUrl) : [],
+    pages: Array.isArray(panels) ? panels.map(asObject).flatMap((panel) => { const url = httpsUrl(panel.url); return url ? [{ side: text(panel.side) || "page", url }] : []; }) : [],
+    cardSize: catalog ? null : text(data.cardSize) || text(card.size),
+  };
+}
+
+// The print shop an order item goes to: the one its print order was planned for, else the one the order
+// would be sent to (the same rule as lib/pod/fulfillment.ts planItem). null when it cannot be told.
+export function itemProvider(item: { podProvider?: string | null; personalization?: unknown }): string | null {
+  if (item.podProvider) return item.podProvider;
+  const data = asObject(item.personalization);
+  const product = asObject(data.product);
+  if (product.kind === "CATALOG" && text(product.productKind)) return podProviderFor(String(product.productKind), product.provider);
+  if (Object.keys(asObject(data.card)).length) return podProviderFor("POSTCARD", data.provider);
+  return null;
+}
 
 // The picture of what the customer designed, saved with the order item: the studio preview of a
 // product, or the front page of a card exactly as it was rendered for printing.

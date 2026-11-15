@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AdminPageHeader, AdminShell } from "@/components/admin";
+import { AdminModal, ProviderBadges, Thumb, clickableRow, stopRowClick } from "@/components/admin-ui";
 import { Icon } from "@/components/icons";
 import { BrandLoader } from "@/components/loading";
 import { Price, Spinner, StatusBadge, Toast } from "@/components/site";
@@ -31,6 +32,16 @@ const toCents = (value: string) => Math.round(Number(value.replace(",", ".")) * 
 const validPrice = (value: string) => value.trim() !== "" && Number.isFinite(Number(value.replace(",", "."))) && Number(value.replace(",", ".")) >= 0;
 const slugify = (value: string) => value.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "product";
 
+// The print shops this product's orders go to: each size's own print shop, else the product's. Phone cases
+// are always made by Printeers. Empty when none is set (shown as "Not Assigned").
+function productProviders(product: ApiProduct): PodProvider[] {
+  if (product.kind === "PHONE_CASE") return ["PRINTEERS"];
+  const own = isPodProvider(product.metadata?.provider) ? product.metadata.provider : null;
+  const used = product.variants.length ? product.variants.map((variant) => variantAttributes(variant.attributes).provider || own) : [own];
+  return Array.from(new Set(used.filter((provider): provider is PodProvider => Boolean(provider))));
+}
+
+
 function priceLabel(product: ApiProduct) {
   if (!product.variants.length) return <Price value={product.basePriceCents / 100} />;
   const prices = product.variants.map((variant) => variant.priceCents);
@@ -51,6 +62,9 @@ export default function AdminProductsPage() {
   const [actionId, setActionId] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [toast, setToast] = useState("");
+  // The product whose details are open (read from the list, so it shows the latest after a change).
+  const [viewingId, setViewingId] = useState<string | null>(null);
+  const viewing = products.find((product) => product.id === viewingId) || null;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -139,7 +153,6 @@ export default function AdminProductsPage() {
       setToast(reason instanceof Error ? reason.message : "Unable to save product");
     } finally { setSaving(false); }
   };
-  const toggle = async (product: ApiProduct) => { setActionId(product.id); try { const response = await fetch(`/api/admin/products?id=${encodeURIComponent(product.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: !product.active }) }); if (!response.ok) { const body = await response.json(); setToast(body.error || "Unable to update product"); return; } await load(); setToast(product.active ? "Product hidden from the storefront" : "Product visible on the storefront"); } catch (reason) { setToast(reason instanceof Error ? reason.message : "Unable to update product"); } finally { setActionId(null); } };
   const remove = async (product: ApiProduct) => { if (!window.confirm(`Delete ${product.name} permanently? It will disappear from the storefront and can no longer be bought.`)) return; setActionId(product.id); try { const response = await fetch(`/api/admin/products?id=${encodeURIComponent(product.id)}`, { method: "DELETE" }); if (!response.ok) { const body = await response.json(); setToast(body.error || "Unable to delete product"); return; } await load(); setToast("Product deleted from the catalog and database"); } catch (reason) { setToast(reason instanceof Error ? reason.message : "Unable to delete product"); } finally { setActionId(null); } };
 
   const total = PRODUCT_KINDS.reduce((sum, kind) => sum + (counts[kind] || 0), 0);
@@ -151,9 +164,73 @@ export default function AdminProductsPage() {
       {loadError ? <div role="alert" className="flex flex-col items-start gap-3 p-6 text-sm font-bold text-[#c94758] sm:flex-row sm:items-center sm:justify-between"><span>{loadError}</span><button type="button" onClick={() => void load()} className="rounded-full border border-[#dfd3cc] px-4 py-2 text-xs font-black text-[#182443]">Retry</button></div>
         : loading && products.length === 0 ? <BrandLoader label="Loading products…" />
         : products.length === 0 ? <div className="p-10 text-center"><p className="text-sm font-black">No products in {filter === "ALL" ? "the catalog" : PRODUCT_KIND_INFO[filter].admin} yet</p><p className="mt-1 text-xs text-[#737b90]">Products you add here appear on {filter === "ALL" ? "their category page" : PRODUCT_KIND_INFO[filter].path}.</p><button type="button" onClick={openNew} className="mt-4 rounded-full bg-[#182443] px-4 py-2.5 text-xs font-black text-white">+ Add product</button></div>
-        : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left"><thead><tr className="border-b border-[#e4e7ee] bg-[#fafbfc] text-[10px] uppercase tracking-[.14em] text-[#9297a4]"><th className="px-5 py-3">Product</th><th className="px-5 py-3">Category</th><th className="px-5 py-3">Price</th><th className="px-5 py-3">Status</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody>{products.map((product) => { const busy = actionId === product.id; const image = product.images?.[0]?.asset?.url; return <tr key={product.id} className="border-b border-[#eef0f4] text-sm"><td className="px-5 py-4"><div className="flex items-center gap-3">{image ? <img src={image} alt="" className="h-10 w-10 rounded-lg object-cover" /> : <span className="h-10 w-10 rounded-lg bg-[#f4eee9]" />}<span><span className="block font-black">{product.name}{product.featured && <span className="ml-2 text-[10px] font-black text-[#ee5264]">★ Featured</span>}</span><span className="block text-[11px] text-[#9297a4]">{product.kind === "POSTCARD" ? `Template: ${TEMPLATE_NAMES[product.metadata?.templateSlug || DEFAULT_CARD_TEMPLATE]}` : [product.variants.length ? `${product.variants.length} sizes` : null, product.options.length ? `${product.options.length} options` : null, `${product.metadata?.photoCount || 1} photo${(product.metadata?.photoCount || 1) > 1 ? "s" : ""}`].filter(Boolean).join(" · ")}</span></span></div></td><td className="px-5 py-4 text-[#737b90]">{PRODUCT_KIND_INFO[product.kind].admin}</td><td className="px-5 py-4 font-black">{priceLabel(product)}</td><td className="px-5 py-4"><button disabled={busy} onClick={() => void toggle(product)} className="disabled:cursor-wait disabled:opacity-60" title={product.active ? "Click to hide from the storefront" : "Click to show on the storefront"}>{busy ? <Spinner size={20} className="text-[#ee5264]" /> : <StatusBadge tone={product.active ? "green" : "slate"}>{product.active ? "Active" : "Inactive"}</StatusBadge>}</button></td><td className="px-5 py-4 text-right"><a href={product.kind === "POSTCARD" ? "/templates" : `${PRODUCT_KIND_INFO[product.kind].path}?product=${encodeURIComponent(product.id)}`} target="_blank" rel="noreferrer" className="mr-3 text-xs font-black text-[#59627b]">View</a><button disabled={busy} onClick={() => openEdit(product)} className="mr-3 inline-flex items-center gap-2 text-xs font-black disabled:opacity-50"><Icon name="edit" size={14} /> Edit</button><button disabled={busy} onClick={() => void remove(product)} className="inline-flex items-center gap-1 text-xs font-black text-[#c94758] disabled:cursor-wait disabled:opacity-50">{busy ? <Spinner size={13} /> : null}Delete</button></td></tr>; })}</tbody></table></div>}
+        : <div className="overflow-x-auto"><table className="w-full min-w-[880px] text-left"><thead><tr className="border-b border-[#e4e7ee] bg-[#fafbfc] text-[10px] uppercase tracking-[.14em] text-[#9297a4]"><th className="px-5 py-3">Product</th><th className="px-5 py-3">Category</th><th className="px-5 py-3">Price</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Provider</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody>{products.map((product) => { const busy = actionId === product.id; const image = product.images?.[0]?.asset?.url; return <tr key={product.id} {...clickableRow(() => setViewingId(product.id))} className="cursor-pointer border-b border-[#eef0f4] text-sm outline-none transition hover:bg-[#fafbfc] focus-visible:bg-[#fff6f2]"><td className="px-5 py-4"><div className="flex items-center gap-3">{image ? <img src={image} alt="" className="h-10 w-10 rounded-lg object-cover" /> : <span className="h-10 w-10 rounded-lg bg-[#f4eee9]" />}<span><span className="block font-black">{product.name}{product.featured && <span className="ml-2 text-[10px] font-black text-[#ee5264]">★ Featured</span>}</span><span className="block text-[11px] text-[#9297a4]">{product.kind === "POSTCARD" ? `Template: ${TEMPLATE_NAMES[product.metadata?.templateSlug || DEFAULT_CARD_TEMPLATE]}` : [product.variants.length ? `${product.variants.length} sizes` : null, product.options.length ? `${product.options.length} options` : null, `${product.metadata?.photoCount || 1} photo${(product.metadata?.photoCount || 1) > 1 ? "s" : ""}`].filter(Boolean).join(" · ")}</span></span></div></td><td className="px-5 py-4 text-[#737b90]">{PRODUCT_KIND_INFO[product.kind].admin}</td><td className="px-5 py-4 font-black">{priceLabel(product)}</td><td className="whitespace-nowrap px-5 py-4"><StatusBadge tone={product.active ? "green" : "slate"}>{product.active ? "Active" : "Inactive"}</StatusBadge></td><td className="px-5 py-4"><ProviderBadges providers={productProviders(product)} /></td><td className="px-5 py-4" {...stopRowClick}><div className="flex items-center justify-end gap-2 whitespace-nowrap"><button type="button" disabled={busy} onClick={() => openEdit(product)} className="inline-flex items-center gap-1.5 rounded-full border border-[#dfd3cc] px-3.5 py-1.5 text-xs font-black text-[#182443] transition hover:border-[#182443] disabled:opacity-50"><Icon name="edit" size={13} /> Edit</button><button type="button" disabled={busy} onClick={() => void remove(product)} className="inline-flex items-center gap-1.5 rounded-full border border-[#f3c6c2] px-3.5 py-1.5 text-xs font-black text-[#c94758] transition hover:bg-[#fff0e8] disabled:cursor-wait disabled:opacity-50">{busy ? <Spinner size={13} /> : null}Delete</button></div></td></tr>; })}</tbody></table></div>}
     </section>
+    {viewing && <AdminModal eyebrow={`PRODUCT · ${PRODUCT_KIND_INFO[viewing.kind].admin.toUpperCase()}`} title={viewing.name} subtitle={<>{viewing.slug}</>} onClose={() => setViewingId(null)}>
+      <ProductDetails product={viewing} busy={actionId === viewing.id} onEdit={() => { setViewingId(null); openEdit(viewing); }} onDelete={() => void remove(viewing)} />
+    </AdminModal>}
     {panelOpen && <ProductPanel draft={draft} editing={Boolean(editingId)} saving={saving} onChange={setDraft} onImageFile={setImageFile} onClose={() => setPanelOpen(false)} onSave={() => void save()} />}{toast && <Toast message={toast} onClose={() => setToast("")} />}</AdminShell>;
+}
+
+// Everything about a product in one view: images, prices and sizes, the customer's options and where its
+// orders are printed (print shop, SKUs, Printeers product groups, print file size). Read only; Edit opens
+// the editor.
+function ProductDetails({ product, busy, onEdit, onDelete }: { product: ApiProduct; busy: boolean; onEdit: () => void; onDelete: () => void }) {
+  const images = (product.images || []).map((image) => image.asset?.url).filter((url): url is string => Boolean(url));
+  const printFile = productPrintFile(product.metadata);
+  const declared = isPodProvider(product.metadata?.provider) ? product.metadata.provider : null;
+  const isCard = product.kind === "POSTCARD";
+  const photoCount = product.metadata?.photoCount || 1;
+  const term = (label: string, value: React.ReactNode) => <><dt className="font-black text-[#9297a4]">{label}</dt><dd className="min-w-0 break-words">{value}</dd></>;
+  return <div className="text-xs">
+    <div className="grid gap-5 sm:grid-cols-[240px_1fr]">
+      <div>
+        {images.length ? <Thumb url={images[0]} size="lg" label="Main image" /> : <span className="flex h-56 items-center justify-center rounded-lg border border-dashed border-[#e4e7ee] font-bold text-[#9297a4]">No image</span>}
+        {images.length > 1 && <div className="mt-2 grid grid-cols-3 gap-2">{images.slice(1).map((url, index) => <Thumb key={url} url={url} size="sm" label={`Image ${index + 2}`} />)}</div>}
+      </div>
+      <div className="min-w-0">
+        <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-2">
+          {term("Status", <span className="inline-flex flex-wrap items-center gap-2"><StatusBadge tone={product.active ? "green" : "slate"}>{product.active ? "Active" : "Inactive"}</StatusBadge>{product.featured && <span className="text-[10px] font-black text-[#ee5264]">★ Featured</span>}</span>)}
+          {term("Category", PRODUCT_KIND_INFO[product.kind].admin)}
+          {term("Price", <span className="font-black">{priceLabel(product)}</span>)}
+          {term("Provider", <ProviderBadges providers={productProviders(product)} />)}
+          {isCard ? term("Card template", TEMPLATE_NAMES[product.metadata?.templateSlug || DEFAULT_CARD_TEMPLATE]) : term("Customer photos", `${photoCount} photo${photoCount > 1 ? "s" : ""}${product.variants.some((variant) => variantAttributes(variant.attributes).photoCount) ? " (some sizes differ)" : ""}`)}
+        </dl>
+        {product.description && <p className="mt-4 whitespace-pre-line leading-5 text-[#59627b]">{product.description}</p>}
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button type="button" disabled={busy} onClick={onEdit} className="inline-flex items-center gap-1.5 rounded-full border border-[#dfd3cc] px-3.5 py-1.5 text-xs font-black text-[#182443] transition hover:border-[#182443] disabled:opacity-50"><Icon name="edit" size={13} /> Edit</button>
+          <button type="button" disabled={busy} onClick={onDelete} className="inline-flex items-center gap-1.5 rounded-full border border-[#f3c6c2] px-3.5 py-1.5 text-xs font-black text-[#c94758] transition hover:bg-[#fff0e8] disabled:opacity-50">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <h3 className="mt-7 text-sm font-black">Print shop mapping</h3>
+    <dl className="mt-3 grid grid-cols-[150px_1fr] gap-x-3 gap-y-2 rounded-xl border border-[#e4e7ee] p-3">
+      {term("Product print shop", product.kind === "PHONE_CASE" ? <ProviderBadges providers={["PRINTEERS"]} /> : declared ? <ProviderBadges providers={[declared]} /> : <span><ProviderBadges providers={[]} /> <span className="text-[#9297a4]">orders use the category default ({POD_PROVIDER_LABELS[DEFAULT_POD_PROVIDER[product.kind]]})</span></span>)}
+      {!isCard && term("Print file", printFile ? `${printFile.width} × ${printFile.height} px${printFile.transparentPng ? " · PNG with transparent background" : ""}` : <span className="text-[#9297a4]">not set (the print shop&apos;s size is used)</span>)}
+      {product.kind === "PHONE_CASE" && term("Printeers group", <span className="break-all">Test: <code>{product.metadata?.printeers?.test || "not linked"}</code><br />Live: <code>{product.metadata?.printeers?.live || "not linked"}</code></span>)}
+    </dl>
+
+    {!isCard && <>
+      <h3 className="mt-7 text-sm font-black">{variantLabel(product.kind).title} ({product.variants.length})</h3>
+      {product.variants.length ? <div className="mt-3 overflow-x-auto rounded-xl border border-[#e4e7ee]"><table className="w-full min-w-[520px] text-left">
+        <thead><tr className="border-b border-[#e4e7ee] bg-[#fafbfc] text-[10px] uppercase tracking-[.12em] text-[#9297a4]"><th className="px-3 py-2">Name</th><th className="px-3 py-2">Price</th><th className="px-3 py-2">Photos</th><th className="px-3 py-2">Print shop SKU</th><th className="px-3 py-2">Print shop</th></tr></thead>
+        <tbody>{product.variants.map((variant) => { const attributes = variantAttributes(variant.attributes); return <tr key={variant.id} className="border-b border-[#eef0f4] last:border-0">
+          <td className="px-3 py-2 font-black">{variant.name}</td>
+          <td className="px-3 py-2"><Price value={variant.priceCents / 100} /></td>
+          <td className="px-3 py-2">{attributes.photoCount || photoCount}</td>
+          <td className="break-all px-3 py-2">{attributes.podSku || <span className="text-[#9297a4]">mapped automatically</span>}</td>
+          <td className="px-3 py-2"><ProviderBadges providers={[product.kind === "PHONE_CASE" ? "PRINTEERS" : attributes.provider || declared]} /></td>
+        </tr>; })}</tbody>
+      </table></div> : <p className="mt-2 text-[#9297a4]">No sizes: the base price is used.</p>}
+
+      <h3 className="mt-7 text-sm font-black">Customization options ({product.options.length})</h3>
+      {product.options.length ? <div className="mt-3 space-y-2">{product.options.map((option) => { const choices = option.config?.choices || []; return <div key={option.id} className="rounded-xl border border-[#e4e7ee] p-3">
+        <p className="font-black">{option.name} <span className="font-bold text-[#9297a4]">· {option.required ? "required" : "optional"} · {choices.length} choices</span></p>
+        <p className="mt-2 flex flex-wrap gap-1.5">{choices.slice(0, 40).map((choice) => <span key={choice} className="rounded-full bg-[#f4eee9] px-2.5 py-1 text-[10px] font-bold text-[#59627b]">{choice}</span>)}{choices.length > 40 && <span className="px-1 py-1 text-[10px] font-bold text-[#9297a4]">+{choices.length - 40} more</span>}</p>
+      </div>; })}</div> : <p className="mt-2 text-[#9297a4]">None besides the product&apos;s own studio options.</p>}
+    </>}
+  </div>;
 }
 
 function ProductPanel({ draft, editing, saving, onChange, onImageFile, onClose, onSave }: { draft: Draft; editing: boolean; saving: boolean; onChange: (draft: Draft) => void; onImageFile: (file: File | null) => void; onClose: () => void; onSave: () => void }) {
