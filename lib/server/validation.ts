@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CARD_SIZE_IDS } from "@/lib/data";
-import { CARD_TEMPLATE_SLUGS, MAX_PRODUCT_PHOTOS, POD_PROVIDERS, PRODUCT_KINDS } from "@/lib/products";
+import { CARD_TEMPLATE_SLUGS, MAX_PRODUCT_PHOTOS, MAX_SELECTION_PHOTOS, POD_PROVIDERS, PRODUCT_KINDS } from "@/lib/products";
 
 export const adminLoginSchema = z.object({ email: z.string().email(), password: z.string().min(8).max(200) });
 export const customerRegisterSchema = z.object({
@@ -30,7 +30,8 @@ export const cartLineSchema = z.object({
       productId: z.string().cuid(),
       variantId: z.string().cuid().nullable(),
       options: z.record(z.string().max(40), z.string().max(160)).refine((value) => Object.keys(value).length <= 20, "Too many options"),
-      photos: z.array(z.string().nullable()).max(MAX_PRODUCT_PHOTOS),
+      // Up to 12 photos, plus the calendar front cover (photos[12]).
+      photos: z.array(z.string().nullable()).max(MAX_SELECTION_PHOTOS),
       name: z.string().max(200),
       detail: z.string().max(400),
       image: z.string().max(2000).nullable(),

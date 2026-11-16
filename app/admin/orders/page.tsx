@@ -203,8 +203,8 @@ function OrderItemCard({ item }: { item: OrderItem }) {
       <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">{item.pages.map((page) => <Thumb key={page.url} url={page.url} size="sm" label={PAGE_LABEL[page.side] || page.side} />)}</div>
     </div>}
     {photos.length > 0 && <div className="mt-4">
-      <p className="text-[11px] font-black">Customer&apos;s uploaded photos ({photos.length}{calendar ? " of 12 months" : ""})</p>
-      <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{photos.map((photo) => <Thumb key={photo.index} url={photo.url} size="sm" label={calendar ? MONTHS[photo.index] || `Month ${photo.index + 1}` : `Photo ${photo.index + 1}`} />)}</div>
+      <p className="text-[11px] font-black">Customer&apos;s uploaded photos ({calendar ? `${photos.filter((photo) => photo.index < 12).length} of 12 months${photos.some((photo) => photo.index === 12) ? " + cover" : ", no separate cover"}` : photos.length})</p>
+      <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{(calendar ? [...photos].sort((a, b) => (a.index === 12 ? -1 : b.index === 12 ? 1 : a.index - b.index)) : photos).map((photo) => <Thumb key={photo.index} url={photo.url} size="sm" label={calendar ? (photo.index === 12 ? "Front cover" : MONTHS[photo.index] || `Month ${photo.index + 1}`) : `Photo ${photo.index + 1}`} />)}</div>
     </div>}
     <div className="mt-4">
       <p className="text-[11px] font-black">Print files sent to the print shop{item.printFiles.length ? ` (${item.printFiles.length})` : ""}</p>

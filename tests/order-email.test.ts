@@ -17,15 +17,18 @@ vi.mock("@/lib/server/prisma", () => ({
   },
 }));
 
-import { buildOrderConfirmationEmail, ORDER_EMAIL_PARAGRAPHS, sendOrderConfirmationEmail, smtpConfig } from "@/lib/server/order-email";
+import { buildOrderConfirmationEmail, emailSiteUrl, isTestPayment, ORDER_EMAIL_PARAGRAPHS, sendOrderConfirmationEmail, smtpConfig, testRecipient } from "@/lib/server/order-email";
 
-const paidOrder = (patch: Record<string, unknown> = {}) => ({ id: "o1", number: "CM-1", email: "cliente@example.org", currency: "eur", totalCents: 2350, status: "PAID", items: [{ name: "Tarjeta <b>", quantity: 2 }], payments: [{ id: "p1" }], ...patch });
+const paidOrder = (patch: Record<string, unknown> = {}) => ({ id: "o1", number: "CM-1", email: "cliente@example.org", currency: "eur", totalCents: 2350, status: "PAID", items: [{ name: "Tarjeta <b>", quantity: 2 }], payments: [{ id: "p1", provider: "stripe" }], ...patch });
 
 beforeEach(() => {
   sendMail.mockReset().mockResolvedValue({});
   claims.clear();
   order = paidOrder();
   Object.assign(process.env, { SMTP_HOST: "smtp.mailer.test", SMTP_PORT: "587", SMTP_USER: "user", SMTP_PASSWORD: "secret-pass", SMTP_FROM: "Celebra Momentos <hola@celebra-momentos.test>" });
+  // Live payments unless a test says otherwise (fake values: nothing here reaches Stripe or PayPal).
+  Object.assign(process.env, { STRIPE_SECRET_KEY: "sk_live_fake_for_tests", PAYPAL_MODE: "live" });
+  delete process.env.ORDER_EMAIL_TEST_RECIPIENT;
 });
 
 describe("order confirmation email", () => {
@@ -73,5 +76,61 @@ describe("order confirmation email", () => {
     expect(await sendOrderConfirmationEmail("o1")).toBe("disabled");
     expect(sendMail).not.toHaveBeenCalled();
     expect(claims.size).toBe(0);
+  });
+
+  it("is a responsive, branded email with the order number, the separate-packages notice and a contact link", () => {
+    const mail = buildOrderConfirmationEmail({ number: "CM-77", currency: "eur", totalCents: 4599, items: [{ name: "Calendario", quantity: 1 }, { name: "Taza", quantity: 2 }] }, { siteUrl: "https://www.celebra-momentos.com" });
+    expect(mail.subject).toBe("¡Gracias por tu pedido! 🎁 · CM-77");
+    expect(mail.html).toContain('name="viewport"');
+    expect(mail.html).toContain("CM-77");
+    expect(mail.html).toContain("paquetes separados");
+    expect(mail.html).toContain('href="https://www.celebra-momentos.com/contact"');
+    expect(mail.html).toContain("https://www.celebra-momentos.com/images/logo.png");
+    expect(mail.text).toContain("https://www.celebra-momentos.com/contact");
+    expect(mail.text).toContain("2 × Taza");
+  });
+
+  it("links to the public shop, never to a local development URL", () => {
+    expect(emailSiteUrl("http://localhost:3000")).toBe("https://www.celebra-momentos.com");
+    expect(emailSiteUrl("https://preview.example.org")).toBe("https://preview.example.org");
+  });
+
+  it("tells test payments from live ones by the keys in use", () => {
+    expect(isTestPayment("stripe", { STRIPE_SECRET_KEY: "sk_test_abc" })).toBe(true);
+    expect(isTestPayment("stripe", { STRIPE_SECRET_KEY: "sk_live_abc" })).toBe(false);
+    expect(isTestPayment("stripe", {})).toBe(true);
+    expect(isTestPayment("paypal", { PAYPAL_MODE: "sandbox" })).toBe(true);
+    expect(isTestPayment("paypal", {})).toBe(true);
+    expect(isTestPayment("paypal", { PAYPAL_MODE: "live" })).toBe(false);
+    expect(testRecipient({ ORDER_EMAIL_TEST_RECIPIENT: "not an email" })).toBeNull();
+  });
+
+  it("never emails the customer for a test payment; only the test inbox when one is set", async () => {
+    process.env.STRIPE_SECRET_KEY = "sk_test_fake";
+    expect(await sendOrderConfirmationEmail("o1")).toBe("test_mode");
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(claims.size).toBe(0);
+
+    process.env.ORDER_EMAIL_TEST_RECIPIENT = "pruebas@example.org";
+    expect(await sendOrderConfirmationEmail("o1")).toBe("sent");
+    expect(await sendOrderConfirmationEmail("o1")).toBe("duplicate");
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0]).toMatchObject({ to: "pruebas@example.org" });
+    expect(sendMail.mock.calls[0][0].subject).toMatch(/^\[PRUEBA\]/);
+    expect(JSON.stringify(sendMail.mock.calls[0][0])).not.toContain("cliente@example.org");
+  });
+
+  it("a PayPal sandbox payment is a test payment too", async () => {
+    process.env.PAYPAL_MODE = "sandbox";
+    order = paidOrder({ payments: [{ id: "p1", provider: "paypal" }] });
+    expect(await sendOrderConfirmationEmail("o1")).toBe("test_mode");
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it("a delivery failure is reported, never thrown (the payment response is not affected)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    sendMail.mockRejectedValueOnce(new Error("Invalid login"));
+    await expect(sendOrderConfirmationEmail("o1")).resolves.toBe("failed");
+    error.mockRestore();
   });
 });

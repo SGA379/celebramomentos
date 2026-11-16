@@ -300,10 +300,14 @@ const MONTHS = ["January", "February", "March", "April", "May", "June", "July", 
 function CustomerPhotos({ item }: { item: Item }) {
   const photos = item.photos.map((url, index) => ({ url, index })).filter((photo): photo is { url: string; index: number } => Boolean(photo.url));
   const calendar = item.kind === "CALENDAR";
+  // Calendars: photos[12] is the separate front cover (shown first); without it the cover uses January.
+  const months = photos.filter((photo) => photo.index < 12).length;
+  const cover = photos.some((photo) => photo.index === 12);
+  const shown = calendar ? [...photos].sort((a, b) => (a.index === 12 ? -1 : b.index === 12 ? 1 : a.index - b.index)) : photos;
   return <div className="mt-3 rounded-xl bg-[#fafbfc] p-3 text-[11px]">
-    <p className="font-black">Customer&apos;s uploaded photos {calendar ? `(${photos.length} of 12 months)` : `(${photos.length})`}</p>
-    {photos.length ? <div className="mt-2 grid grid-cols-3 gap-2">{photos.map((photo) => <Thumb key={photo.index} url={photo.url} label={calendar ? MONTHS[photo.index] || `Month ${photo.index + 1}` : `Photo ${photo.index + 1}`} detail="reference only — not sent" />)}</div>
+    <p className="font-black">Customer&apos;s uploaded photos {calendar ? `(${months} of 12 months${cover ? " + front cover" : "; no separate cover, January is used"})` : `(${photos.length})`}</p>
+    {photos.length ? <div className="mt-2 grid grid-cols-3 gap-2">{shown.map((photo) => <Thumb key={photo.index} url={photo.url} label={calendar ? (photo.index === 12 ? "Front cover" : MONTHS[photo.index] || `Month ${photo.index + 1}`) : `Photo ${photo.index + 1}`} detail="reference only — not sent" />)}</div>
       : <p className="mt-1 font-bold text-[#c94758]">The customer did not upload any photo.</p>}
-    {calendar && photos.length < 12 && photos.length > 0 && <p className="mt-2 text-[#8a5a00]">Only {photos.length} of the 12 months have a photo; the other months will be blank in the calendar unless you fill them.</p>}
+    {calendar && months < 12 && months > 0 && <p className="mt-2 text-[#8a5a00]">Only {months} of the 12 months have a photo; the other months will be blank in the calendar unless you fill them.</p>}
   </div>;
 }
