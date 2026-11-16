@@ -76,14 +76,16 @@ async function boxPhoto(url: string, box: Box) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-// The 14-page calendar PDF (cover, 12 months, back) made from the customer's month photos, saved as this
-// item's print file. Photos that are not uploads from this site are left out (their month gets a plain page).
-export async function renderCalendarFile(input: { orderId: string; itemId: string; unit: number; area: string; photos: (string | null)[]; year: number; language: CalendarLanguage; pageMm: { width: number; height: number } }) {
+// The 14-page calendar PDF (cover, 12 months, back) made from the customer's photos, saved as this item's
+// print file. The cover uses the customer's own cover photo, or (calendars ordered without one) the first
+// month photo. Photos that are not uploads from this site are left out (their month gets a plain page).
+export async function renderCalendarFile(input: { orderId: string; itemId: string; unit: number; area: string; photos: (string | null)[]; cover?: string | null; year: number; language: CalendarLanguage; pageMm: { width: number; height: number } }) {
   const layout = calendarLayout(input.pageMm);
   const usable = input.photos.map((url) => (url && isCloudinaryUrl(url) ? url : null));
+  const cover = (input.cover && isCloudinaryUrl(input.cover) ? input.cover : null) ?? usable.find(Boolean) ?? null;
   const [monthPhotos, coverPhoto] = await Promise.all([
     Promise.all(usable.map((url) => (url ? boxPhoto(url, layout.month) : Promise.resolve(null)))),
-    usable.find(Boolean) ? boxPhoto(usable.find(Boolean)!, layout.cover) : Promise.resolve(null),
+    cover ? boxPhoto(cover, layout.cover) : Promise.resolve(null),
   ]);
   const bytes = await buildCalendarPdf({ page: input.pageMm, year: input.year, language: input.language, monthPhotos, coverPhoto });
   const name = `${input.itemId}-${input.unit + 1}-${input.area}-calendar.pdf`;
@@ -96,7 +98,7 @@ export async function renderCalendarFile(input: { orderId: string; itemId: strin
     mimeType: "application/pdf",
     sizeBytes: uploaded.bytes || bytes.byteLength,
     originalName: name,
-    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pages: CALENDAR_PAGES, pageMm: input.pageMm, year: input.year, language: input.language, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length },
+    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pages: CALENDAR_PAGES, pageMm: input.pageMm, year: input.year, language: input.language, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length, coverPhoto: Boolean(input.cover && isCloudinaryUrl(input.cover)) },
   };
   await prisma.asset.upsert({ where: { objectKey }, create: { objectKey, ...data }, update: data });
   return { url: uploaded.secureUrl, pages: CALENDAR_PAGES, bytes: data.sizeBytes };

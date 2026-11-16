@@ -4,7 +4,7 @@ import { normalizeCrop } from "@/lib/crop";
 import { PodApiError } from "@/lib/pod/http";
 import { unavailableCombination } from "@/lib/pod/catalog";
 import { linkedProductgroup, phoneModel, printeersCatalogReady } from "@/lib/pod/printeers/catalog";
-import { MAX_PRODUCT_PHOTOS, PRODUCT_KIND_INFO, podProviderFor, requiredPhotoCount, variantAttributes, type CatalogProduct } from "@/lib/products";
+import { CALENDAR_PHOTOS, MAX_PRODUCT_PHOTOS, MAX_SELECTION_PHOTOS, PRODUCT_KIND_INFO, podProviderFor, requiredPhotoCount, variantAttributes, type CatalogProduct } from "@/lib/products";
 import { getDeliveryPriceCents } from "@/lib/shipping";
 import type { CartItem, CatalogSelection, ProductSelection } from "@/lib/store";
 import { prisma } from "./prisma";
@@ -89,13 +89,16 @@ async function resolveCatalogSelection(selection: CatalogSelection): Promise<Cat
     if (!adminKeys.has(key) && value.trim()) options[key] = value.trim();
   }
   if (printeers && !product.options.some(isModelOption)) options.modelo = printeers.name;
-  const photos = selection.photos.slice(0, MAX_PRODUCT_PHOTOS);
+  // A calendar keeps its optional front cover after the 12 months (photos[12]); other products have up to 12.
+  const calendar = selection.productKind === "CALENDAR";
+  const photos = selection.photos.slice(0, calendar ? MAX_SELECTION_PHOTOS : MAX_PRODUCT_PHOTOS);
   const metadata = product.metadata as CatalogProduct["metadata"];
   // Never take payment for a combination the print shop cannot make.
   const unavailable = unavailableCombination({ kind: selection.productKind, provider: podProviderFor(selection.productKind, variant?.provider || metadata?.provider), productName: product.name, variantName, podSku: variant?.podSku || null, options, photoCount: Math.max(1, photos.filter(Boolean).length), cardSize: null, cardSku: null });
   if (unavailable) throw new CatalogError(unavailable.reason === "orientation" ? `Este tamaño solo está disponible en ${unavailable.available.toLowerCase()}. Cambia la orientación o elige otro tamaño.` : "Este tamaño no está disponible ahora mismo. Elige otro tamaño.", 400);
   const requiredPhotos = requiredPhotoCount({ metadata, kind: selection.productKind }, variant);
-  if (photos.filter(Boolean).length < requiredPhotos) throw new CatalogError(requiredPhotos === 1 ? "Sube tu fotografía para este producto." : `Sube ${requiredPhotos} fotografías para este producto.`, 400);
+  // Calendars: every month needs its own photo (the cover does not count as a month).
+  if ((calendar ? photos.slice(0, CALENDAR_PHOTOS) : photos).filter(Boolean).length < requiredPhotos) throw new CatalogError(requiredPhotos === 1 ? "Sube tu fotografía para este producto." : `Sube ${requiredPhotos} fotografías para este producto.`, 400);
   return {
     ...selection,
     options,

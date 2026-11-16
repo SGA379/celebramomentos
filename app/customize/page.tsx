@@ -15,6 +15,7 @@ import { LoadingButton, holdWhileNavigating } from "@/components/loading-button"
 import { AuthRequiredModal, PageIntro, Price, SiteFooter, SiteHeader, Toast } from "@/components/site";
 import { CARD_SIZES, DEFAULT_CARD_SIZE, cardSizeText, designCategories, frames, resolveFrame, templates } from "@/lib/data";
 import { usePublicSettings } from "@/lib/public-settings";
+import { MAX_UPLOAD_MB, UPLOAD_ACCEPT, UPLOAD_FORMATS, prepareUpload } from "@/lib/image-guide";
 import { amountUntilFreeShippingCents, qualifiesForFreeShipping } from "@/lib/shipping";
 import { type EmojiOption } from "@/lib/emojis";
 import {
@@ -225,18 +226,20 @@ export default function CustomizePage() {
     dispatch(setFrame(frameId));
   };
 
+  // Photos over MAX_UPLOAD_MB are optimised in the browser so the upload at checkout always fits (lib/image-guide.ts).
   const handlePhoto = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      dispatch(setPhotoAt({ index: uploadIndex, dataUrl: String(reader.result) }));
+    const index = uploadIndex;
+    const failed = () => setToast(isPortuguese ? "Não conseguimos abrir esta foto. Carrega uma imagem JPG ou PNG." : "No hemos podido abrir esta foto. Sube una imagen JPG o PNG.");
+    if (!/^image\/(jpeg|png)$/.test(file.type)) { failed(); return; }
+    prepareUpload(file).then((dataUrl) => {
+      dispatch(setPhotoAt({ index, dataUrl }));
       dispatch(setPhotoZoom(1));
       dispatch(setPhotoPosition("center"));
-      setToast(isPortuguese ? `Fotografia ${uploadIndex + 1} atualizada` : `Foto ${uploadIndex + 1} actualizada`);
-    };
-    reader.readAsDataURL(file);
-    event.target.value = "";
+      setToast(isPortuguese ? `Fotografia ${index + 1} atualizada` : `Foto ${index + 1} actualizada`);
+    }, failed);
   };
 
 
@@ -476,6 +479,12 @@ export default function CustomizePage() {
                       {tx("Restablecer", "Repor")}
                     </button>
                   </div>
+
+                  {/* Photo size recommendation: one card page of the chosen size at Prodigi's print size (lib/data.ts CARD_SIZES). */}
+                  {activeSection !== "back" && (() => {
+                    const size = CARD_SIZES.find((option) => option.id === cart.card.size) || CARD_SIZES.find((option) => option.id === DEFAULT_CARD_SIZE)!;
+                    return <p className="mt-5 rounded-xl border border-[#eadfd8] bg-white px-3.5 py-2.5 text-[11px] leading-5 text-[#737b90]"><span className="font-black text-[#182443]">{tx("Fotos recomendadas:", "Fotografias recomendadas:")}</span> {tx(`al menos ${size.panel.width} × ${size.panel.height} px (300 ppp) para una foto a toda la cara de la tarjeta ${size.label}.`, `pelo menos ${size.panel.width} × ${size.panel.height} px (300 ppp) para uma fotografia em toda a face do cartão ${size.label}.`)} {tx(`Formatos: ${UPLOAD_FORMATS} · hasta ${MAX_UPLOAD_MB} MB (las fotos más grandes se optimizan automáticamente).`, `Formatos: ${UPLOAD_FORMATS} · até ${MAX_UPLOAD_MB} MB (as fotos maiores são otimizadas automaticamente).`)}</p>;
+                  })()}
 
                   {/* Section 1: FRONT */}
                   {activeSection === "front" && (
@@ -896,7 +905,7 @@ export default function CustomizePage() {
                     </div>
                   )}
 
-                  <input ref={inputRef} onChange={handlePhoto} type="file" accept="image/png,image/jpeg" className="hidden" />
+                  <input ref={inputRef} onChange={handlePhoto} type="file" accept={UPLOAD_ACCEPT} className="hidden" />
 
                   {/* Section Next / Prev Buttons */}
                   <div className="mt-8 flex flex-col gap-3 border-t border-[#eadfd8] pt-6 sm:flex-row sm:items-center sm:justify-between">

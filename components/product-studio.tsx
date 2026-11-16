@@ -15,7 +15,8 @@ import { trackPixel } from "@/lib/meta-pixel";
 import { CROP_LIMITS, DEFAULT_CROP, cropRect, mmToPx, normalizeCrop, type ImageCrop } from "@/lib/crop";
 import { studioPhotoTarget, unavailableCombination } from "@/lib/pod/catalog";
 import { minimumPhotoSize, photoEnlargement, photoQuality, type PhotoQuality } from "@/lib/print-quality";
-import { CALENDAR_PHOTOS, MAX_PRODUCT_PHOTOS, podProviderFor, productPrintFile, requiredPhotoCount, type CatalogProduct, type PrintFile, type StudioProductKind } from "@/lib/products";
+import { CALENDAR_COVER_INDEX, CALENDAR_PHOTOS, MAX_PRODUCT_PHOTOS, MAX_SELECTION_PHOTOS, podProviderFor, productPrintFile, requiredPhotoCount, type CatalogProduct, type PrintFile, type StudioProductKind } from "@/lib/products";
+import { MAX_UPLOAD_MB, UPLOAD_ACCEPT, UPLOAD_FORMATS, photoGuide, prepareUpload, type PhotoGuide } from "@/lib/image-guide";
 import { RootState, defaultCardCustomization, saveCartItem, type CatalogSelection, type ProductSelection } from "@/lib/store";
 import { PosterHanger, hangerColorFrom, orientationFrom } from "@/components/poster-hanger";
 import { PublishedProducts, catalogImage, useCatalogProducts } from "@/components/published-products";
@@ -26,21 +27,25 @@ import { PublishedProducts, catalogImage, useCatalogProducts } from "@/component
 
 const formatCents = (cents: number) => (cents / 100).toFixed(2).replace(".", ",") + " €";
 
-function readPhoto(event: ChangeEvent<HTMLInputElement>, onRead: (value: string) => void) {
+// Reads the chosen photo (photos over MAX_UPLOAD_MB are optimised in the browser so the upload at checkout
+// always fits; see lib/image-guide.ts).
+function readPhoto(event: ChangeEvent<HTMLInputElement>, onRead: (value: string) => void, onError: (failed: boolean) => void) {
   const file = event.target.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => onRead(String(reader.result));
-  reader.readAsDataURL(file);
   // Allow choosing the same file again after replacing it.
   event.target.value = "";
+  if (!file) return;
+  onError(false);
+  if (!/^image\/(jpeg|png)$/.test(file.type)) { onError(true); return; }
+  prepareUpload(file).then(onRead, () => onError(true));
 }
 
 function UploadButton({ photo, onPhoto, es, label }: { photo: string | null; onPhoto: (value: string) => void; es: boolean; label?: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [failed, setFailed] = useState(false);
   return <>
-    <button type="button" onClick={() => inputRef.current?.click()} className="focus-ring mt-3 flex w-full items-center gap-3 rounded-2xl border border-dashed border-[#e7a59c] bg-white p-3 text-left transition hover:bg-[#fff0e8]"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#fff0e8] text-[#ee5264]"><Icon name="plus" size={18} /></span><span><span className="block text-sm font-black">{label || (photo ? (es ? "Cambiar fotografía" : "Alterar fotografia") : (es ? "Subir una fotografía" : "Carregar uma fotografia"))}</span><span className="mt-0.5 block text-xs text-[#7c8191]">JPG o PNG · {es ? "la vista previa se actualiza aquí" : "a pré-visualização atualiza aqui"}</span></span></button>
-    <input ref={inputRef} type="file" accept="image/png,image/jpeg" className="hidden" onChange={(event) => readPhoto(event, onPhoto)} />
+    <button type="button" onClick={() => inputRef.current?.click()} className="focus-ring mt-3 flex w-full items-center gap-3 rounded-2xl border border-dashed border-[#e7a59c] bg-white p-3 text-left transition hover:bg-[#fff0e8]"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#fff0e8] text-[#ee5264]"><Icon name="plus" size={18} /></span><span><span className="block text-sm font-black">{label || (photo ? (es ? "Cambiar fotografía" : "Alterar fotografia") : (es ? "Subir una fotografía" : "Carregar uma fotografia"))}</span><span className="mt-0.5 block text-xs text-[#7c8191]">{es ? "JPG o PNG" : "JPG ou PNG"} · {es ? "la vista previa se actualiza aquí" : "a pré-visualização atualiza aqui"}</span></span></button>
+    <input ref={inputRef} type="file" accept={UPLOAD_ACCEPT} className="hidden" onChange={(event) => readPhoto(event, onPhoto, setFailed)} />
+    {failed && <p role="alert" className="mt-2 rounded-lg bg-[#fff0e8] px-2.5 py-1.5 text-[11px] font-bold text-[#c94758]">{es ? "No hemos podido abrir esta foto. Sube una imagen JPG o PNG." : "Não conseguimos abrir esta foto. Carrega uma imagem JPG ou PNG."}</p>}
   </>;
 }
 
@@ -66,13 +71,16 @@ function usePhotoSizes(photos: (string | null)[]) {
 // The worst photo for its print file: "too_small" (cannot be ordered) or "low" (can be ordered once the
 // customer confirms they accept a less sharp print), with the size that prints sharp; null when every
 // photo is good enough or its size is not known yet.
-function photoCheck(photos: (string | null)[], sizes: Record<string, { width: number; height: number }>, printFile: (PrintFile & { fit?: "cover" | "contain" }) | null, zoom = 1): { level: Extract<PhotoQuality, "low" | "too_small">; index: number; size: { width: number; height: number }; minimum: { width: number; height: number } } | null {
-  if (!printFile) return null;
+// printFileAt: a different print size per photo slot (calendars: the cover is bigger than a month photo).
+function photoCheck(photos: (string | null)[], sizes: Record<string, { width: number; height: number }>, printFile: (PrintFile & { fit?: "cover" | "contain" }) | null, zoom = 1, printFileAt?: (index: number) => (PrintFile & { fit?: "cover" | "contain" }) | null): { level: Extract<PhotoQuality, "low" | "too_small">; index: number; size: { width: number; height: number }; minimum: { width: number; height: number } } | null {
+  if (!printFile && !printFileAt) return null;
   let worst: ReturnType<typeof photoCheck> = null;
   for (const [index, photo] of photos.entries()) {
+    const file = printFileAt?.(index) ?? printFile;
+    if (!file) continue;
     const size = photo ? sizes[photo] : null;
-    const level = size ? photoQuality(photoEnlargement(size, printFile, zoom)) : "good";
-    if (size && (level === "too_small" || (level === "low" && !worst))) worst = { level, index, size, minimum: minimumPhotoSize(printFile) };
+    const level = size ? photoQuality(photoEnlargement(size, file, zoom)) : "good";
+    if (size && (level === "too_small" || (level === "low" && !worst))) worst = { level, index, size, minimum: minimumPhotoSize(file) };
     if (worst?.level === "too_small") break;
   }
   return worst;
@@ -80,7 +88,9 @@ function photoCheck(photos: (string | null)[], sizes: Record<string, { width: nu
 
 // The print shop's recommended file for the product (set in admin → Products),
 // with a warning when the uploaded photo is smaller than recommended.
-function PrintFileNote({ printFile, photo, es }: { printFile: PrintFile | null; photo: string | null; es: boolean }) {
+// Every upload field shows the recommended size (from the print shop specification), the accepted formats
+// and the file size limit. printFile without `dpi` (admin-set files, phone case print areas) is 300 dpi.
+function PrintFileNote({ printFile, photo, es }: { printFile: (PrintFile & { dpi?: number | null; fit?: "contain" }) | null; photo: string | null; es: boolean }) {
   const [measured, setMeasured] = useState<{ src: string; width: number; height: number } | null>(null);
   useEffect(() => {
     if (!photo || !printFile) return;
@@ -90,8 +100,10 @@ function PrintFileNote({ printFile, photo, es }: { printFile: PrintFile | null; 
     image.src = photo;
     return () => { active = false; };
   }, [photo, printFile]);
-  if (!printFile) return null;
+  const formats = <p className="text-[#9297a4]">{es ? `Formatos: ${UPLOAD_FORMATS} · hasta ${MAX_UPLOAD_MB} MB (las fotos más grandes se optimizan automáticamente).` : `Formatos: ${UPLOAD_FORMATS} · até ${MAX_UPLOAD_MB} MB (as fotos maiores são otimizadas automaticamente).`}</p>;
+  if (!printFile) return <div className="mt-2 text-[11px] leading-5">{formats}</div>;
   const { width, height, transparentPng } = printFile;
+  const dpi = printFile.dpi === undefined ? 300 : printFile.dpi;
   const orientation = width === height ? "" : width < height ? (es ? ", en vertical" : ", na vertical") : (es ? ", en horizontal" : ", na horizontal");
   const size = measured && measured.src === photo ? measured : null;
   // Smaller than the file it is cut into (as it is: photos are never rotated).
@@ -99,7 +111,8 @@ function PrintFileNote({ printFile, photo, es }: { printFile: PrintFile | null; 
   const level = size ? photoQuality(photoEnlargement(size, printFile)) : "good";
   const minimum = minimumPhotoSize(printFile);
   return <div className="mt-2 space-y-1.5 text-[11px] leading-5">
-    <p className="text-[#737b90]"><span className="font-black text-[#182443]">{es ? "Archivo recomendado:" : "Ficheiro recomendado:"}</span> {width} × {height} px (300 ppp){orientation}.{transparentPng ? (es ? " Usa PNG con fondo transparente si quieres que la funda se vea a través del diseño." : " Usa PNG com fundo transparente se quiseres que a capa se veja através do design.") : ""}</p>
+    <p className="text-[#737b90]"><span className="font-black text-[#182443]">{es ? "Tamaño recomendado:" : "Tamanho recomendado:"}</span> {width} × {height} px{dpi ? ` (${dpi} ppp)` : ""}{orientation}.{transparentPng ? (es ? " Usa PNG con fondo transparente si quieres que la funda se vea a través del diseño." : " Usa PNG com fundo transparente se quiseres que a capa se veja através do design.") : ""}</p>
+    {formats}
     {size && level === "too_small" ? <p role="alert" className="rounded-lg bg-[#fff0e8] px-2.5 py-1.5 font-bold text-[#c94758]">{es ? `Tu foto mide ${size.width} × ${size.height} px: es demasiado pequeña para imprimirla en este tamaño. Sube una foto más grande (recomendado: al menos ${minimum.width} × ${minimum.height} px).` : `A tua foto tem ${size.width} × ${size.height} px: é demasiado pequena para imprimir neste tamanho. Carrega uma foto maior (recomendado: pelo menos ${minimum.width} × ${minimum.height} px).`}</p>
       : size && level === "low" ? <p role="status" className="rounded-lg bg-[#fff6e0] px-2.5 py-1.5 font-bold text-[#8a5a00]">{es ? `Tu foto mide ${size.width} × ${size.height} px, menos de lo recomendado (${minimum.width} × ${minimum.height} px): se puede imprimir, pero se verá menos nítida. Para el mejor resultado, sube una foto más grande.` : `A tua foto tem ${size.width} × ${size.height} px, menos do que o recomendado (${minimum.width} × ${minimum.height} px): pode ser impressa, mas ficará menos nítida. Para o melhor resultado, carrega uma foto maior.`}</p>
       : tooSmall && <p role="status" className="rounded-lg bg-[#fff6e0] px-2.5 py-1.5 font-bold text-[#8a5a00]">{es ? `Tu foto mide ${size.width} × ${size.height} px, algo menos de lo recomendado: puede verse un poco menos nítida.` : `A tua foto tem ${size.width} × ${size.height} px, um pouco menos do que o recomendado: pode ficar ligeiramente menos nítida.`}</p>}
@@ -266,6 +279,10 @@ function useStudioCatalog(kind: StudioProductKind) {
     })(),
     photoCount: selected ? requiredPhotoCount(selected, variant) : 1,
     printFile: selected ? productPrintFile(selected.metadata) : null,
+    // Recommended photo size for the chosen size and options, from the print shop specification
+    // (lib/image-guide.ts). Calendars: "cover" or "month". Shown when admin set no print file.
+    // studioOptions: the studio's own choices (e.g. the mug colour), as sent with the order.
+    guide: (slot: "photo" | "cover" | "month" = "photo", studioOptions: Record<string, string> = {}): PhotoGuide | null => selected ? photoGuide({ kind: selected.kind, provider: podProviderFor(selected.kind, selected.metadata?.provider), productName: selected.name, variantName: variant?.name ?? null, podSku: null, options: Object.fromEntries(Object.entries({ ...studioOptions, ...options }).filter(([, value]) => value)), photoCount: 1, cardSize: null, cardSku: null }, slot) : null,
     image: selected?.images[0]?.asset.url || null,
     select,
     applyEdit,
@@ -327,12 +344,13 @@ function CatalogControls({ studio, es, sizeLabel, variantName, hideOption }: { s
   </div>;
 }
 
-type StudioAction = { label: string; busy: boolean; disabled?: boolean; hint?: string; onClick: (more?: Partial<CatalogSelection>) => unknown; authPrompt: boolean; onCloseAuth: () => void; returnTo: string; photos: (string | null)[]; printFile: PrintFile | null; zoom?: number; options: Record<string, string> };
+type StudioAction = { label: string; busy: boolean; disabled?: boolean; hint?: string; onClick: (more?: Partial<CatalogSelection>) => unknown; authPrompt: boolean; onCloseAuth: () => void; returnTo: string; photos: (string | null)[]; printFile: PrintFile | null; printFileAt?: (index: number) => PrintFile | null; zoom?: number; options: Record<string, string> };
 
 // Add-to-cart action for the selected product.
-function catalogAction(studio: StudioCatalog, cart: ReturnType<typeof useStudioCart>, es: boolean, photos: (string | null)[], studioOptions: Record<string, string>, returnTo: string, extra: { selection?: Partial<CatalogSelection>; hint?: string; printFile?: PrintFile | null; zoom?: number } = {}): StudioAction | undefined {
+function catalogAction(studio: StudioCatalog, cart: ReturnType<typeof useStudioCart>, es: boolean, photos: (string | null)[], studioOptions: Record<string, string>, returnTo: string, extra: { selection?: Partial<CatalogSelection>; hint?: string; printFile?: PrintFile | null; printFileAt?: (index: number) => PrintFile | null; zoom?: number } = {}): StudioAction | undefined {
   if (!studio.selected) return undefined;
-  const missingPhotos = Math.max(0, studio.photoCount - photos.filter(Boolean).length);
+  // Only the required slots count (a calendar's optional cover, photos[12], is not one of its 12 months).
+  const missingPhotos = Math.max(0, studio.photoCount - photos.slice(0, studio.photoCount).filter(Boolean).length);
   const hint = !studio.ready ? undefined
     : missingPhotos ? (missingPhotos === 1 ? (es ? "Sube 1 fotografía más para continuar." : "Carrega mais 1 fotografia para continuar.") : (es ? `Sube ${missingPhotos} fotografías más para continuar.` : `Carrega mais ${missingPhotos} fotografias para continuar.`))
     : extra.hint ? extra.hint
@@ -353,6 +371,7 @@ function catalogAction(studio: StudioCatalog, cart: ReturnType<typeof useStudioC
     // only after the customer confirms.
     photos,
     printFile: extra.printFile !== undefined ? extra.printFile : studio.printFile,
+    printFileAt: extra.printFileAt,
     zoom: extra.zoom,
     // Every option the order will carry (the studio's own, e.g. the mug colour, and the admin's), as
     // toSelection sends them: the size and quality checks must see the same product the server makes.
@@ -376,14 +395,14 @@ function StudioShell({ eyebrow, title, body, controls, preview, es, studio, cata
   const target = givenAction && !givenAction.printFile && studio.selected
     ? studioPhotoTarget({ kind: studio.selected.kind, provider: podProviderFor(studio.selected.kind, studio.selected.metadata?.provider), productName: studio.selected.name, variantName: studio.variant?.name ?? null, podSku: null, options: givenAction.options, photoCount: Math.max(1, studio.photoCount), cardSize: null, cardSku: null })
     : null;
-  const check = givenAction ? photoCheck(givenAction.photos, photoSizes, givenAction.printFile || target, givenAction.zoom) : null;
+  const check = givenAction ? photoCheck(givenAction.photos, photoSizes, givenAction.printFile || target, givenAction.zoom, givenAction.printFileAt) : null;
   // A size/option combination the print shop cannot make cannot be added (the server refuses it as well).
   const unavailable = givenAction && studio.selected ? unavailableCombination({ kind: studio.selected.kind, provider: podProviderFor(studio.selected.kind, studio.selected.metadata?.provider), productName: studio.selected.name, variantName: studio.variant?.name ?? null, podSku: null, options: givenAction.options, photoCount: Math.max(1, studio.photoCount), cardSize: null, cardSku: null }) : null;
   const unavailableHint = !unavailable ? null : unavailable.reason === "orientation"
     ? (es ? `Este tamaño solo está disponible en ${unavailable.available.toLowerCase()}. Cambia la orientación o elige otro tamaño.` : `Este tamanho só está disponível na ${unavailable.available === "Vertical" ? "vertical" : "horizontal"}. Muda a orientação ou escolhe outro tamanho.`)
     : (es ? "Este tamaño no está disponible ahora mismo. Elige otro tamaño." : "Este tamanho não está disponível neste momento. Escolhe outro tamanho.");
   const zoomed = Boolean(givenAction?.zoom && givenAction.zoom > 1);
-  const whichPhoto = (index: number) => (givenAction && givenAction.photos.length > 1 ? (es ? `La foto ${index + 1}` : `A foto ${index + 1}`) : (es ? "Tu foto" : "A tua foto"));
+  const whichPhoto = (index: number) => (studio.selected?.kind === "CALENDAR" ? (index === CALENDAR_COVER_INDEX ? (es ? "La foto de la portada" : "A foto da capa") : (es ? `La foto de ${MONTHS.es[index]}` : `A foto de ${MONTHS.pt[index]}`)) : givenAction && givenAction.photos.length > 1 ? (es ? `La foto ${index + 1}` : `A foto ${index + 1}`) : (es ? "Tu foto" : "A tua foto"));
   // A small photo never stops the order: the print file is always made at the exact size the print shop
   // needs (lib/pod/fulfillment.ts). The customer is only told it may print less sharp, and the order is
   // sent automatically with a note for the admin.
@@ -409,18 +428,22 @@ function useCatalogEdit(editing: ProductSelection | undefined, studio: StudioCat
 }
 
 // One photo slot per required photo, with a picker for the slot being edited.
-function PhotoSlots({ photos, count, required = false, active, onActive, onPhoto, es, slotLabel, sample, aspect = "aspect-square", printFile = null }: { photos: (string | null)[]; count: number; required?: boolean; active: number; onActive: (index: number) => void; onPhoto: (value: string) => void; es: boolean; slotLabel: (index: number) => string; sample?: (index: number) => string; aspect?: string; printFile?: PrintFile | null }) {
+// order: the slots in display order (default 0 … count − 1); optional: slots that need no photo (not counted).
+function PhotoSlots({ photos, count, required = false, active, onActive, onPhoto, es, slotLabel, sample, aspect = "aspect-square", printFile = null, order, optional }: { photos: (string | null)[]; count: number; required?: boolean; active: number; onActive: (index: number) => void; onPhoto: (value: string) => void; es: boolean; slotLabel: (index: number) => string; sample?: (index: number) => string; aspect?: string; printFile?: (PrintFile & { dpi?: number | null; fit?: "contain" }) | null; order?: number[]; optional?: (index: number) => boolean }) {
+  const slots = order || Array.from({ length: count }, (_, index) => index);
+  const counted = slots.filter((index) => !optional?.(index));
+  const filled = counted.filter((index) => photos[index]).length;
   return <div>
-    <p className="text-sm font-black">{count === 1 ? (es ? "Tu fotografía" : "A tua fotografia") : (es ? `Tus fotografías (${photos.slice(0, count).filter(Boolean).length}/${count})` : `As tuas fotografias (${photos.slice(0, count).filter(Boolean).length}/${count})`)}{required && <span className="ml-1 text-[#ee5264]" aria-hidden="true">*</span>}</p>
-    {required && count > 1 && (() => { const missing = count - photos.slice(0, count).filter(Boolean).length; return <p role="status" className={`mt-1 text-[11px] font-bold ${missing ? "text-[#c94758]" : "text-[#24714b]"}`}>{missing ? (es ? `Obligatorio: sube las ${count} fotografías (faltan ${missing}).` : `Obrigatório: carrega as ${count} fotografias (faltam ${missing}).`) : (es ? "¡Todas las fotografías están subidas!" : "Todas as fotografias estão carregadas!")}</p>; })()}
-    {count > 1 && <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-6">
-      {Array.from({ length: count }).map((_, index) => <button key={index} type="button" onClick={() => onActive(index)} aria-pressed={active === index} aria-label={slotLabel(index)} className={`focus-ring relative overflow-hidden rounded-lg border-2 bg-[#f4eee9] ${aspect} ${active === index ? "border-[#ee5264]" : required && !photos[index] ? "border-dashed border-[#e7a59c]" : "border-transparent"}`}>
+    <p className="text-sm font-black">{slots.length === 1 ? (es ? "Tu fotografía" : "A tua fotografia") : (es ? `Tus fotografías (${filled}/${counted.length})` : `As tuas fotografias (${filled}/${counted.length})`)}{required && <span className="ml-1 text-[#ee5264]" aria-hidden="true">*</span>}</p>
+    {required && counted.length > 1 && (() => { const missing = counted.length - filled; return <p role="status" className={`mt-1 text-[11px] font-bold ${missing ? "text-[#c94758]" : "text-[#24714b]"}`}>{missing ? (es ? `Obligatorio: sube las ${counted.length} fotografías (faltan ${missing}).` : `Obrigatório: carrega as ${counted.length} fotografias (faltam ${missing}).`) : (es ? "¡Todas las fotografías están subidas!" : "Todas as fotografias estão carregadas!")}</p>; })()}
+    {slots.length > 1 && <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-6">
+      {slots.map((index) => <button key={index} type="button" onClick={() => onActive(index)} aria-pressed={active === index} aria-label={slotLabel(index)} className={`focus-ring relative overflow-hidden rounded-lg border-2 bg-[#f4eee9] ${aspect} ${active === index ? "border-[#ee5264]" : required && !optional?.(index) && !photos[index] ? "border-dashed border-[#e7a59c]" : "border-transparent"}`}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         {(photos[index] || sample) && <img src={photos[index] || sample?.(index)} alt="" className={`h-full w-full object-cover ${photos[index] ? "" : "opacity-40"}`} />}
-        <span className="absolute inset-x-0 bottom-0 bg-[#182443]/75 py-0.5 text-center text-[8px] font-black text-white">{slotLabel(index)}</span>
+        <span className={`absolute inset-x-0 bottom-0 py-0.5 text-center text-[8px] font-black text-white ${optional?.(index) ? "bg-[#ee5264]/90" : "bg-[#182443]/75"}`}>{slotLabel(index)}</span>
       </button>)}
     </div>}
-    <UploadButton photo={photos[active] || null} onPhoto={onPhoto} es={es} label={count > 1 ? `${photos[active] ? (es ? "Cambiar" : "Alterar") : (es ? "Subir" : "Carregar")} · ${slotLabel(active)}` : undefined} />
+    <UploadButton photo={photos[active] || null} onPhoto={onPhoto} es={es} label={slots.length > 1 ? `${photos[active] ? (es ? "Cambiar" : "Alterar") : (es ? "Subir" : "Carregar")} · ${slotLabel(active)}` : undefined} />
     <PrintFileNote printFile={printFile} photo={photos[active] || null} es={es} />
   </div>;
 }
@@ -436,26 +459,50 @@ export function CalendarStudio() {
   const es = useSelector((state: RootState) => state.language.language) === "es";
   const studio = useStudioCatalog("CALENDAR");
   const cart = useStudioCart("CALENDAR");
-  const [photos, setPhotos] = useState<(string | null)[]>(Array(12).fill(null));
-  const [month, setMonth] = useState(0);
-  useCatalogEdit(cart.editing, studio, useCallback((selection: CatalogSelection) => setPhotos(Array.from({ length: 12 }, (_, index) => selection.photos[index] || null)), []));
+  // The 12 months (January = 0) and, after them, the optional front cover (photos[CALENDAR_COVER_INDEX]):
+  // saved in that order so January stays at index 0 for every calendar. The editor starts on the cover.
+  const [photos, setPhotos] = useState<(string | null)[]>(Array(MAX_SELECTION_PHOTOS).fill(null));
+  const [slot, setSlot] = useState(CALENDAR_COVER_INDEX);
+  useCatalogEdit(cart.editing, studio, useCallback((selection: CatalogSelection) => setPhotos(Array.from({ length: MAX_SELECTION_PHOTOS }, (_, index) => selection.photos[index] || null)), []));
   const monthNames = es ? MONTHS.es : MONTHS.pt;
+  const coverLabel = es ? "Portada" : "Capa";
+  const onCover = slot === CALENDAR_COVER_INDEX;
+  const month = onCover ? 0 : slot;
   const year = new Date().getFullYear() + 1;
   // Monday-first grid for the month being edited.
   const offset = (new Date(year, month, 1).getDay() + 6) % 7;
   const days = new Date(year, month + 1, 0).getDate();
   const variantName = studio.variant?.name || "";
   const shape = /40/.test(variantName) ? "w-[46%]" : /A4/i.test(variantName) ? "w-[82%]" : "w-full";
+  // Exact photo sizes of the calendar PDF for the chosen size (cover box and month box at 300 dpi);
+  // a print file set in admin wins, as for every product.
+  const coverGuide = studio.guide("cover");
+  const monthGuide = studio.guide("month");
+  const printFileAt = (index: number) => studio.printFile ?? (index === CALENDAR_COVER_INDEX ? coverGuide : monthGuide);
+  const coverAspect = coverGuide ? coverGuide.width / coverGuide.height : 0.94;
+  const coverPhoto = photos[CALENDAR_COVER_INDEX];
+  const order = [CALENDAR_COVER_INDEX, ...Array.from({ length: CALENDAR_PHOTOS }, (_, index) => index)];
   const controls = <div className="mt-6 space-y-6">
-    <PhotoSlots photos={photos} count={CALENDAR_PHOTOS} required active={month} onActive={setMonth} onPhoto={(value) => setPhotos((current) => current.map((photo, index) => (index === month ? value : photo)))} es={es} slotLabel={(index) => monthNames[index].slice(0, 3)} aspect="aspect-[4/3]" printFile={studio.printFile} />
-    <p className="text-[11px] leading-5 text-[#9297a4]">{es ? "Elige un mes y sube su fotografía: cada mes del calendario lleva su propia foto." : "Escolhe um mês e carrega a fotografia: cada mês do calendário leva a sua própria foto."}</p>
+    <PhotoSlots photos={photos} count={CALENDAR_PHOTOS} required order={order} optional={(index) => index === CALENDAR_COVER_INDEX} active={slot} onActive={setSlot} onPhoto={(value) => setPhotos((current) => current.map((photo, index) => (index === slot ? value : photo)))} es={es} slotLabel={(index) => (index === CALENDAR_COVER_INDEX ? coverLabel : monthNames[index].slice(0, 3))} aspect="aspect-[4/3]" printFile={printFileAt(slot)} />
+    <p className="text-[11px] leading-5 text-[#9297a4]">{es ? "Empieza por la portada (opcional: si no subes una, usaremos la foto de enero) y después elige cada mes y sube su fotografía." : "Começa pela capa (opcional: se não carregares uma, usamos a foto de janeiro) e depois escolhe cada mês e carrega a fotografia."}</p>
   </div>;
-  const preview = <div className="mx-auto max-w-[560px]"><div className={`mx-auto overflow-hidden rounded-[16px] bg-white shadow-2xl shadow-[#8a564c]/15 transition-all ${shape}`}><div className="flex h-5 items-center justify-center gap-3 bg-[#182443]">{Array.from({ length: 13 }).map((_, index) => <span key={index} className="h-2.5 w-1 rounded-full bg-white/70" />)}</div>
-    {/* eslint-disable-next-line @next/next/no-img-element */}
-    <img src={photos[month] || studio.image || "/images/calendar-product.png"} alt={es ? `Vista previa de ${monthNames[month]}` : `Pré-visualização de ${monthNames[month]}`} className={`aspect-[1.65/1] w-full object-cover ${photos[month] ? "" : "opacity-50"}`} />
-    <div className="p-4 sm:p-6"><div className="flex items-end justify-between border-b border-[#182443] pb-3"><h3 className="serif text-2xl font-bold uppercase sm:text-3xl">{monthNames[month]}</h3><span className="text-[10px] font-black">{year}</span></div><div className="mt-3 grid grid-cols-7 gap-px bg-[#eadfd8]">{Array.from({ length: 42 }).map((_, index) => { const day = index - offset + 1; return <span key={index} className="flex aspect-square items-start justify-end bg-white p-1 text-[7px] text-[#59627b]">{day >= 1 && day <= days ? day : ""}</span>; })}</div></div></div>
-    <div className="mt-4 flex flex-wrap justify-center gap-1.5">{monthNames.map((name, index) => <button key={name} type="button" onClick={() => setMonth(index)} aria-pressed={month === index} className={`rounded-full px-2.5 py-1 text-[9px] font-black uppercase ${month === index ? "bg-[#182443] text-white" : photos[index] ? "bg-[#e8f5ed] text-[#24714b]" : "bg-white text-[#9297a4]"}`}>{name.slice(0, 3)}{photos[index] ? " ✓" : ""}</button>)}</div></div>;
-  return <StudioShell eyebrow={es ? "CALENDARIOS PERSONALIZADOS" : "CALENDÁRIOS PERSONALIZADOS"} title={es ? "Un año lleno de los tuyos" : "Um ano cheio dos teus"} body={es ? "Elige el tamaño y añade una fotografía para cada mes del año." : "Escolhe o tamanho e adiciona uma fotografia para cada mês do ano."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Calendarios disponibles" : "Calendários disponíveis"} action={catalogAction(studio, cart, es, photos.slice(0, MAX_PRODUCT_PHOTOS), {}, "/calendars")} />;
+  const binding = <div className="flex h-5 items-center justify-center gap-3 bg-[#182443]">{Array.from({ length: 13 }).map((_, index) => <span key={index} className="h-2.5 w-1 rounded-full bg-white/70" />)}</div>;
+  const page = onCover
+    ? <div className={`mx-auto overflow-hidden rounded-[16px] bg-white shadow-2xl shadow-[#8a564c]/15 transition-all ${shape}`}>{binding}
+      <div className="p-4 sm:p-6">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={coverPhoto || photos[0] || studio.image || "/images/calendar-product.png"} alt={es ? "Vista previa de la portada" : "Pré-visualização da capa"} style={{ aspectRatio: String(coverAspect) }} className={`w-full object-cover ${coverPhoto ? "" : "opacity-50"}`} />
+        <p className="serif mt-4 text-center text-4xl font-bold text-[#182443] sm:text-5xl">{year}</p>
+        <p className="mt-1 text-center text-[10px] font-black uppercase tracking-[.2em] text-[#ee5264]">{es ? "Calendario" : "Calendário"}</p>
+        {!coverPhoto && <p className="mt-3 text-center text-[11px] font-bold text-[#9297a4]">{photos[0] ? (es ? "Sin portada propia: se usará la foto de enero." : "Sem capa própria: será usada a foto de janeiro.") : (es ? "Sube la foto de la portada." : "Carrega a foto da capa.")}</p>}
+      </div></div>
+    : <div className={`mx-auto overflow-hidden rounded-[16px] bg-white shadow-2xl shadow-[#8a564c]/15 transition-all ${shape}`}>{binding}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={photos[month] || studio.image || "/images/calendar-product.png"} alt={es ? `Vista previa de ${monthNames[month]}` : `Pré-visualização de ${monthNames[month]}`} className={`aspect-[1.65/1] w-full object-cover ${photos[month] ? "" : "opacity-50"}`} />
+      <div className="p-4 sm:p-6"><div className="flex items-end justify-between border-b border-[#182443] pb-3"><h3 className="serif text-2xl font-bold uppercase sm:text-3xl">{monthNames[month]}</h3><span className="text-[10px] font-black">{year}</span></div><div className="mt-3 grid grid-cols-7 gap-px bg-[#eadfd8]">{Array.from({ length: 42 }).map((_, index) => { const day = index - offset + 1; return <span key={index} className="flex aspect-square items-start justify-end bg-white p-1 text-[7px] text-[#59627b]">{day >= 1 && day <= days ? day : ""}</span>; })}</div></div></div>;
+  const preview = <div className="mx-auto max-w-[560px]">{page}
+    <div className="mt-4 flex flex-wrap justify-center gap-1.5">{order.map((index) => { const name = index === CALENDAR_COVER_INDEX ? coverLabel : monthNames[index].slice(0, 3); return <button key={index} type="button" onClick={() => setSlot(index)} aria-pressed={slot === index} className={`rounded-full px-2.5 py-1 text-[9px] font-black uppercase ${slot === index ? "bg-[#182443] text-white" : photos[index] ? "bg-[#e8f5ed] text-[#24714b]" : "bg-white text-[#9297a4]"}`}>{name}{photos[index] ? " ✓" : ""}</button>; })}</div></div>;
+  return <StudioShell eyebrow={es ? "CALENDARIOS PERSONALIZADOS" : "CALENDÁRIOS PERSONALIZADOS"} title={es ? "Un año lleno de los tuyos" : "Um ano cheio dos teus"} body={es ? "Elige el tamaño, añade una portada y una fotografía para cada mes del año." : "Escolhe o tamanho, adiciona uma capa e uma fotografia para cada mês do ano."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Calendarios disponibles" : "Calendários disponíveis"} action={catalogAction(studio, cart, es, photos, {}, "/calendars", { printFileAt })} />;
 }
 
 // ── Wall Art (Gelato poster with hanger) ─────────────────────────────────────
@@ -470,7 +517,7 @@ export function WallArtStudio() {
   const [photo, setPhoto] = useState<string | null>(null);
   useCatalogEdit(cart.editing, studio, useCallback((selection: CatalogSelection) => setPhoto(selection.photos[0] || null), []));
   const orientation = orientationFrom(studio.optionValue(ORIENTATION_OPTION));
-  const controls = <div className="mt-6 space-y-6"><PhotoSlots photos={[photo]} count={1} active={0} onActive={() => undefined} onPhoto={setPhoto} es={es} slotLabel={() => ""} printFile={studio.printFile} /></div>;
+  const controls = <div className="mt-6 space-y-6"><PhotoSlots photos={[photo]} count={1} active={0} onActive={() => undefined} onPhoto={setPhoto} es={es} slotLabel={() => ""} printFile={studio.printFile ?? studio.guide()} /></div>;
   const preview = (
     <div className="relative flex aspect-[4/3] items-center justify-center overflow-hidden rounded-[20px] bg-[#ece6dc] p-6">
       <PosterHanger photo={photo} alt={studio.selected?.name || (es ? "Póster con colgador" : "Poster com suporte")} color={hangerColorFrom(studio.optionValue(FRAME_OPTION))} orientation={orientation} className={`transition-all duration-300 ${orientation === "horizontal" ? "h-[78%]" : "h-[94%]"}`} />
@@ -494,7 +541,7 @@ export function MagnetsStudio() {
   useEffect(() => { setActive((current) => Math.min(current, count - 1)); }, [count]);
   const sample = (index: number) => MAGNET_SAMPLE_PHOTOS[index % MAGNET_SAMPLE_PHOTOS.length];
   const controls = <div className="mt-6 space-y-6">
-    <PhotoSlots photos={photos} count={count} required active={active} onActive={setActive} onPhoto={(value) => setPhotos((current) => current.map((photo, index) => (index === active ? value : photo)))} es={es} slotLabel={(index) => `${index + 1}`} sample={sample} aspect="aspect-[3/2]" printFile={studio.printFile} />
+    <PhotoSlots photos={photos} count={count} required active={active} onActive={setActive} onPhoto={(value) => setPhotos((current) => current.map((photo, index) => (index === active ? value : photo)))} es={es} slotLabel={(index) => `${index + 1}`} sample={sample} aspect="aspect-[3/2]" printFile={studio.printFile ?? studio.guide()} />
     {count > 1 && <p className="text-[11px] leading-5 text-[#9297a4]">{es ? "Cada imán lleva su propia fotografía. Las fotos atenuadas son ejemplos." : "Cada íman leva a sua própria fotografia. As fotografias esbatidas são exemplos."}</p>}
   </div>;
   const columns = count <= 1 ? "grid-cols-1 max-w-[360px]" : count <= 4 ? "grid-cols-2 max-w-[520px]" : count <= 9 ? "grid-cols-3" : "grid-cols-4";
@@ -729,6 +776,7 @@ export function PhoneCaseStudio() {
       {detail?.backorder && detail.reference === modelRef && <span role="status" className="mt-2 block rounded-lg bg-[#f4f6fb] px-2.5 py-1.5 text-[11px] font-bold leading-5 text-[#59627b]">{es ? "Este modelo se fabrica bajo pedido: puede tardar unos días más en enviarse." : "Este modelo é fabricado por encomenda: pode demorar mais alguns dias a ser enviado."}</span>}
     </label>}
     <PhotoSlots photos={[photo]} count={1} active={0} onActive={() => undefined} onPhoto={(value) => { setPhoto(value); setCrop(DEFAULT_CROP); }} es={es} slotLabel={() => ""} printFile={printFile} />
+    {printeers && !modelRef && <p className="-mt-3 text-[11px] font-bold text-[#9297a4]">{es ? "Elige el modelo de tu móvil para ver el tamaño de foto recomendado: cada funda tiene su propia zona de impresión." : "Escolhe o modelo do teu telemóvel para ver o tamanho de fotografia recomendado: cada capa tem a sua própria área de impressão."}</p>}
     {printeers && photo && aspect && <div className="rounded-2xl border border-[#eadfd8] bg-white p-4">
       <p className="text-xs font-black">{es ? "Encuadre de la foto" : "Enquadramento da foto"}</p>
       <div className="mt-3 flex items-center gap-3">
@@ -827,7 +875,7 @@ export function MugStudio() {
       <div>
         <p className="text-sm font-black">{es ? "Tu fotografía" : "A tua fotografia"}</p>
         <UploadButton photo={photo} onPhoto={setPhoto} es={es} />
-        <PrintFileNote printFile={studio.printFile} photo={photo} es={es} />
+        <PrintFileNote printFile={studio.printFile ?? studio.guide("photo", { color: colorName || "" })} photo={photo} es={es} />
       </div>
     </div>
   );

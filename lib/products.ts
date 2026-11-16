@@ -96,6 +96,11 @@ export function productPhotoCount(product: Pick<CatalogProduct, "metadata">) {
 
 // A wall calendar has one page per month: all 12 photos are required, whatever size is chosen.
 export const CALENDAR_PHOTOS = 12;
+// The calendar's own front cover photo is stored after the 12 months (photos[12]), so every saved
+// calendar keeps January at index 0. It is optional: without it the cover uses the January photo.
+export const CALENDAR_COVER_INDEX = 12;
+// Photos a cart line may carry: up to 12 for any product, plus the calendar cover.
+export const MAX_SELECTION_PHOTOS = CALENDAR_COVER_INDEX + 1;
 
 export function requiredPhotoCount(product: Pick<CatalogProduct, "metadata"> & { kind?: string }, variant: { photoCount: number | null } | null) {
   if (product.kind === "CALENDAR") return CALENDAR_PHOTOS;

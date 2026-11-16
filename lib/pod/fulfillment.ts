@@ -12,7 +12,7 @@
 import { Prisma, type OrderItem, type PodFulfillment, type PodProvider } from "@prisma/client";
 import { waitUntil } from "@vercel/functions";
 import { normalizeCrop, type ImageCrop } from "@/lib/crop";
-import { POD_PROVIDERS, podProviderFor, variantAttributes } from "@/lib/products";
+import { CALENDAR_COVER_INDEX, POD_PROVIDERS, podProviderFor, variantAttributes } from "@/lib/products";
 import { prisma } from "@/lib/server/prisma";
 import { CARD_SIZES } from "@/lib/data";
 import type { CardDesignSide } from "@/lib/store";
@@ -154,10 +154,14 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
           continue;
         }
         const monthPhotos = Array.from({ length: 12 }, (_, month) => { const url = photos[month]; return url && isCloudinaryUrl(url) && files.has(url) ? url : null; });
+        // The customer's own front cover (photos[CALENDAR_COVER_INDEX]); without it the cover uses the first month photo.
+        const coverUrl = photos[CALENDAR_COVER_INDEX];
+        const cover = coverUrl && isCloudinaryUrl(coverUrl) && files.has(coverUrl) ? coverUrl : null;
         // The studio shows next year's calendar (CalendarStudio); the order's date stands for the day it was designed.
         const year = item.createdAt.getFullYear() + 1;
         const language = await calendarLanguage(item.orderId);
-        const signature = [year, language, `${spec.widthMm}x${spec.heightMm}`, ...monthPhotos.map((url) => url || "-")].join("|");
+        // The cover joins the signature only when there is one, so files made before covers existed stay valid.
+        const signature = [year, language, `${spec.widthMm}x${spec.heightMm}`, ...monthPhotos.map((url) => url || "-"), ...(cover ? [`cover:${cover}`] : [])].join("|");
         const pageMm = { width: spec.widthMm, height: spec.heightMm };
         const base = { kind: "calendar" as const, unit: unitIndex, productRef: unit.productRef, area: spec.area, description: spec.description, format: "pdf" as const };
         if (!monthPhotos.some(Boolean)) {
@@ -167,7 +171,7 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
         }
         const reusable = before?.kind === "calendar" && before.source === "design" && before.url && before.signature === signature ? before.url : null;
         let failure: string | null = null;
-        const url = reusable ?? (await renderCalendarFile({ orderId: item.orderId, itemId: item.id, unit: unitIndex, area: spec.area, photos: monthPhotos, year, language, pageMm }).catch((reason) => { failure = reason instanceof Error ? reason.message : "unknown error"; return null; }))?.url ?? null;
+        const url = reusable ?? (await renderCalendarFile({ orderId: item.orderId, itemId: item.id, unit: unitIndex, area: spec.area, photos: monthPhotos, cover, year, language, pageMm }).catch((reason) => { failure = reason instanceof Error ? reason.message : "unknown error"; return null; }))?.url ?? null;
         if (!url) {
           logPod("calendar print file not made", { itemId: item.id, failure });
           artwork.push({ ...base, url: null, source: null });
@@ -183,6 +187,9 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
         if (empty.length) issues.push({ code: "calendar_months_without_photo", severity: "info", message: `${prefix}${12 - empty.length} of 12 months have a photo; ${empty.join(", ")} get a page with the month name instead` });
         const box = boxPixels(calendarLayout(pageMm).month);
         const low = monthPhotos.map((photo, month) => { const size = sizeOf(photo); return size && Math.max(box.width / size.width, box.height / size.height) > 2 ? monthName(language, month) : null; }).filter(Boolean);
+        const coverBox = boxPixels(calendarLayout(pageMm).cover);
+        const coverSize = sizeOf(cover);
+        if (coverSize && Math.max(coverBox.width / coverSize.width, coverBox.height / coverSize.height) > 2) low.unshift("cover");
         if (low.length) issues.push({ code: "low_resolution", severity: "info", message: `${prefix}Photos below 150 dpi on the calendar page: ${low.join(", ")}` });
         continue;
       }
