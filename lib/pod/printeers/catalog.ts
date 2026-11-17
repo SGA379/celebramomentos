@@ -54,6 +54,14 @@ export function phoneModelName(name: string) {
     .replace(/\s+/g, " ").trim() || name.trim();
 }
 
+// The same phones written two ways count as one model: the wallet group lists both "Apple iPhone 6 / 6s" and
+// "Apple iPhone 6 / iPhone 6s" (two SKUs). The family word after the brand is dropped after each "/".
+export function phoneModelKey(name: string) {
+  const family = name.match(/^\S+\s+([A-Za-z]+)\s/)?.[1];
+  const key = family ? name.replace(new RegExp(`\\s*/\\s*${family}\\s+`, "gi"), " / ") : name;
+  return key.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 // ── Stock → phone cases ──
 // Not phone cases: earbud cases, laptop sleeves and the catch-all "Other" (case types), and tablet
 // cases that share a case type with phones (iPad, Galaxy Tab…).
@@ -118,19 +126,27 @@ export async function productgroups(mode: PodMode = podMode()): Promise<Printeer
 // available: can be ordered now (in stock or on backorder); backorder: it may ship a few days later.
 export type PhoneModel = { reference: string; name: string; available: boolean; backorder: boolean };
 
-// Models of a group; the reference of a model is its Printeers SKU. Printeers sometimes lists one phone
-// under two SKUs (e.g. "Samsung Galaxy J3 (2016)" twice): the customer sees each phone once, preferring
-// a SKU in stock over one on backorder.
-export async function phoneModels(productgroupReference: string, mode: PodMode = podMode()): Promise<PhoneModel[]> {
-  if (printeersApiVersion(mode) === "v2") return v2PhoneModels(productgroupReference, mode);
+// Each phone once: Printeers sometimes lists one phone under two SKUs ("Samsung Galaxy J3 (2016)" twice, or
+// "iPhone 6 / 6s" and "iPhone 6 / iPhone 6s"); a SKU in stock is preferred over one on backorder.
+function uniqueModels(models: PhoneModel[]) {
   const byName = new Map<string, PhoneModel>();
-  for (const { item, group } of await stockCases(mode)) {
-    if (group !== productgroupReference || !orderable(item)) continue;
-    const model = { reference: item.sku, name: phoneModelName(item.name), available: orderable(item), backorder: backordered(item) };
-    const kept = byName.get(model.name);
-    if (!kept || (kept.backorder && !model.backorder)) byName.set(model.name, model);
+  for (const model of models) {
+    if (!model.available) continue;
+    const key = phoneModelKey(model.name);
+    const kept = byName.get(key);
+    if (!kept || (kept.backorder && !model.backorder)) byName.set(key, model);
   }
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name, "es", { numeric: true }));
+}
+
+// Models of a group; the reference of a model is its Printeers SKU.
+export async function phoneModels(productgroupReference: string, mode: PodMode = podMode()): Promise<PhoneModel[]> {
+  if (printeersApiVersion(mode) === "v2") return v2PhoneModels(productgroupReference, mode);
+  const models: PhoneModel[] = [];
+  for (const { item, group } of await stockCases(mode)) {
+    if (group === productgroupReference) models.push({ reference: item.sku, name: phoneModelName(item.name), available: orderable(item), backorder: backordered(item) });
+  }
+  return uniqueModels(models);
 }
 
 export type PhoneModelDetail = {
@@ -225,14 +241,7 @@ async function v2Availability(mode: PodMode, summary: V2ProductSummary) {
 
 async function v2PhoneModels(group: string, mode: PodMode): Promise<PhoneModel[]> {
   const summaries = (await v2Products(mode, group)).filter((product) => SELLABLE.has(product.status));
-  const models = await Promise.all(summaries.map(async (product) => ({ reference: product.reference, name: phoneModelName(product.name), ...(await v2Availability(mode, product)) })));
-  const byName = new Map<string, PhoneModel>();
-  for (const model of models) {
-    if (!model.available) continue;
-    const kept = byName.get(model.name);
-    if (!kept || (kept.backorder && !model.backorder)) byName.set(model.name, model);
-  }
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name, "es", { numeric: true }));
+  return uniqueModels(await Promise.all(summaries.map(async (product) => ({ reference: product.reference, name: phoneModelName(product.name), ...(await v2Availability(mode, product)) }))));
 }
 
 export function v2Detail(product: V2Product): PhoneModelDetail {
