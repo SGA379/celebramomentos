@@ -6,6 +6,7 @@ import { AdminModal, ProviderBadges, Thumb, clickableRow, stopRowClick } from "@
 import { Icon } from "@/components/icons";
 import { BrandLoader } from "@/components/loading";
 import { Price, Spinner, StatusBadge, Toast } from "@/components/site";
+import { APPROVED_PHONE_CASES, type ApprovedPhoneCase } from "@/lib/pod/printeers/approved";
 import { CARD_TEMPLATE_SLUGS, DEFAULT_CARD_TEMPLATE, DEFAULT_POD_PROVIDER, MAX_PRODUCT_PHOTOS, POD_PROVIDERS, POD_PROVIDER_LABELS, PRICE_IN_TEXT, PRODUCT_KIND_INFO, PRODUCT_KINDS, isPodProvider, productPrintFile, variantAttributes, type CardTemplateSlug, type PodProvider, type ProductKind } from "@/lib/products";
 
 type ApiProduct = {
@@ -241,7 +242,7 @@ function ProductPanel({ draft, editing, saving, onChange, onImageFile, onClose, 
   const setOption = (index: number, changes: Partial<OptionDraft>) => onChange({ ...draft, options: draft.options.map((option, current) => current === index ? { ...option, ...changes } : option) });
   return <div className="fixed inset-0 z-50"><button className="absolute inset-0 bg-[#182443]/25" onClick={onClose} aria-label="Close" /><section className="absolute bottom-0 right-0 top-0 w-full max-w-[460px] overflow-y-auto bg-white p-6 shadow-2xl sm:p-8"><button type="button" onClick={onClose} className="float-right text-xs font-black text-[#737b90]">Close</button><p className="pt-8 text-[10px] font-black tracking-widest text-[#ee5264]">DATABASE CATALOG</p><h2 className="mt-2 text-2xl font-black">{editing ? "Edit product" : "Add product"}</h2>
     <label className="mt-8 block text-sm font-black">Category<select value={draft.kind} onChange={(event) => { const kind = event.target.value as ProductKind; onChange({ ...draft, kind, provider: DEFAULT_POD_PROVIDER[kind], ...(editing ? {} : { photoCount: defaultPhotoCount(kind) }) }); }} className="field">{KIND_ORDER.map((kind) => <option key={kind} value={kind}>{PRODUCT_KIND_INFO[kind].admin}</option>)}</select><span className="mt-1 block text-[11px] font-bold text-[#9297a4]">Shown on {PRODUCT_KIND_INFO[draft.kind].path}</span></label>
-    {draft.kind === "PHONE_CASE" ? <PrinteersLink value={draft.printeers} onChange={(printeers) => onChange({ ...draft, provider: "PRINTEERS", printeers })} />
+    {draft.kind === "PHONE_CASE" ? <PrinteersLink value={draft.printeers} price={draft.price} onChange={(printeers) => onChange({ ...draft, provider: "PRINTEERS", printeers })} />
       : <label className="mt-4 block text-sm font-black">Print shop (POD)<select value={draft.provider} onChange={(event) => onChange({ ...draft, provider: event.target.value as PodProvider })} className="field">{POD_PROVIDERS.filter((provider) => provider !== "PRINTEERS").map((provider) => <option key={provider} value={provider}>{POD_PROVIDER_LABELS[provider]}</option>)}</select><span className="mt-1 block text-[11px] font-bold text-[#9297a4]">Saved on every order line so you know where to send it.</span></label>}
     <label className="mt-4 block text-sm font-black">Product name<input value={draft.name} onChange={(event) => onChange({ ...draft, name: event.target.value })} className="field" autoFocus /></label>
     <label className="mt-4 block text-sm font-black">Description<textarea value={draft.description} onChange={(event) => onChange({ ...draft, description: event.target.value })} className="field resize-none" rows={3} /></label>
@@ -257,13 +258,16 @@ function ProductPanel({ draft, editing, saving, onChange, onImageFile, onClose, 
     <button type="button" disabled={saving} onClick={onSave} className="mt-7 flex w-full items-center justify-center gap-2 rounded-full bg-[#ee5264] px-5 py-3.5 text-sm font-black text-white disabled:cursor-wait disabled:opacity-60">{saving ? <><Spinner size={15} />Saving…</> : "Save"}</button></section></div>;
 }
 
-type PrinteersSetup = { environment: "test" | "live"; problem: string | null; connected: boolean; productgroups: { reference: string; name: string; private: boolean; price: number | null; suggestedRetailPrice: number | null }[] };
+type PrinteersGroup = { reference: string; name: string; private: boolean; price: number | null; suggestedRetailPrice: number | null; approved: ApprovedPhoneCase | null };
+type PrinteersSetup = { environment: "test" | "live"; problem: string | null; connected: boolean; productgroups: PrinteersGroup[] };
+type PrinteersModel = { reference: string; name: string; backorder: boolean };
 const euros = (cents: number | null) => (cents === null ? "—" : `${(cents / 100).toFixed(2).replace(".", ",")} €`);
 
 // Phone cases are made by Printeers. The product is linked to one Printeers product group
 // (e.g. Soft TPU cases) per environment; customers then pick their phone model from that
 // group's live product list. References differ between the test and live environments.
-function PrinteersLink({ value, onChange }: { value: { test: string; live: string }; onChange: (value: { test: string; live: string }) => void }) {
+// The three client-approved case types are listed first; any other group gets a warning.
+function PrinteersLink({ value, price, onChange }: { value: { test: string; live: string }; price: string; onChange: (value: { test: string; live: string }) => void }) {
   const [setup, setSetup] = useState<PrinteersSetup | null>(null);
   const [failed, setFailed] = useState("");
   useEffect(() => {
@@ -275,6 +279,10 @@ function PrinteersLink({ value, onChange }: { value: { test: string; live: strin
   const current = value[env];
   const other = env === "test" ? value.live : value.test;
   const chosen = setup?.productgroups.find((group) => group.reference === current);
+  const approved = setup?.productgroups.filter((group) => group.approved) || [];
+  const others = setup?.productgroups.filter((group) => !group.approved) || [];
+  const selling = validPrice(price) ? toCents(price) : null;
+  const margin = selling !== null && chosen?.price != null ? selling - chosen.price : null;
   return <div className="mt-4 rounded-2xl border border-[#e4e7ee] p-4">
     <p className="text-sm font-black">Print shop (POD): Printeers</p>
     <p className="mt-1 text-[11px] leading-4 text-[#9297a4]">Phone cases are always sent to Printeers. Link this product to a Printeers product group; customers then choose their phone model from that group. Environment in use: <b>{env === "live" ? "production" : "test"}</b>.</p>
@@ -283,11 +291,50 @@ function PrinteersLink({ value, onChange }: { value: { test: string; live: strin
     {setup?.connected && <label className="mt-3 block text-xs font-black">Printeers product group ({env === "live" ? "production" : "test"})
       <select value={current} onChange={(event) => onChange({ ...value, [env]: event.target.value })} className="field">
         <option value="">Not linked</option>
-        {setup.productgroups.map((group) => <option key={group.reference} value={group.reference}>{group.name}{group.private ? " (private)" : ""}</option>)}
+        <optgroup label="Approved case types">{approved.map((group) => <option key={group.reference} value={group.reference} title={APPROVED_PHONE_CASES[group.approved!]}>✓ {group.name}</option>)}</optgroup>
+        <optgroup label="Other Printeers groups (not approved)">{others.map((group) => <option key={group.reference} value={group.reference}>{group.name}{group.private ? " (private)" : ""}</option>)}</optgroup>
         {current && !chosen && <option value={current}>{current} (not found)</option>}
       </select>
     </label>}
-    {chosen && <p className="mt-2 text-[11px] text-[#737b90]">Printeers price: <b>{euros(chosen.price)}</b> · suggested retail: <b>{euros(chosen.suggestedRetailPrice)}</b> (VAT excl.). Your selling price is the price below.</p>}
+    {chosen && !chosen.approved && <p className="mt-2 rounded-lg bg-[#fff6e0] px-2.5 py-1.5 text-[11px] font-bold text-[#8a5a00]">Not one of the approved case types ({Object.values(APPROVED_PHONE_CASES).join("; ")}). Check this is the case you want to sell.</p>}
+    {chosen && <div className="mt-2 grid grid-cols-3 gap-2 rounded-xl bg-[#fafbfc] p-2.5 text-[11px]">
+      <span><span className="block text-[#9297a4]">Printeers cost</span><b>{euros(chosen.price)}</b></span>
+      <span><span className="block text-[#9297a4]">Your price</span><b>{euros(selling)}</b></span>
+      <span><span className="block text-[#9297a4]">Margin</span><b className={margin !== null && margin <= 0 ? "text-[#c94758]" : ""}>{margin === null ? "—" : `${euros(margin)}${selling ? ` · ${Math.round((margin / selling) * 100)}%` : ""}`}</b></span>
+      <span className="col-span-3 text-[10px] leading-4 text-[#9297a4]">Printeers cost is the lowest model price (VAT excl.; suggested retail {euros(chosen.suggestedRetailPrice)}). Margin = your price − cost, before VAT, shipping and payment fees. Change your price in the Price field.</span>
+    </div>}
+    {current && setup?.connected && <PrinteersModels group={current} />}
     {other && <p className="mt-2 text-[11px] text-[#9297a4]">{env === "live" ? "Test" : "Production"} environment: linked to <code>{other}</code>.</p>}
+  </div>;
+}
+
+// The phone models customers can choose for the linked group (from Printeers; read only).
+function PrinteersModels({ group }: { group: string }) {
+  const [models, setModels] = useState<PrinteersModel[] | null>(null);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  useEffect(() => {
+    let active = true;
+    setModels(null); setError("");
+    fetch(`/api/admin/printeers?group=${encodeURIComponent(group)}`, { cache: "no-store" }).then(async (response) => {
+      const body = await response.json();
+      if (!active) return;
+      if (!response.ok) setError(body.error || "Printeers could not be reached"); else setModels(body.models);
+    }).catch(() => { if (active) setError("Printeers could not be reached"); });
+    return () => { active = false; };
+  }, [group]);
+  if (error) return <p className="mt-2 text-[11px] font-bold text-[#c94758]">Phone models: {error}</p>;
+  if (!models) return <p className="mt-2 text-[11px] font-bold text-[#737b90]">Loading phone models…</p>;
+  const term = search.trim().toLowerCase();
+  const shown = term ? models.filter((model) => model.name.toLowerCase().includes(term)) : models;
+  const backorders = models.filter((model) => model.backorder).length;
+  return <div className="mt-2 rounded-xl border border-[#e4e7ee] p-2.5 text-[11px]">
+    <button type="button" onClick={() => setOpen(!open)} className="flex w-full items-center justify-between font-black"><span>{models.length} phone models available{backorders ? ` · ${backorders} on backorder` : ""}</span><span className="text-[#ee5264]">{open ? "Hide" : "Show"}</span></button>
+    {open && <>
+      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search model" className="field !mt-2 !py-1.5 text-xs" aria-label="Search phone model" />
+      <ul className="mt-2 max-h-56 overflow-y-auto">{shown.map((model) => <li key={model.reference} className="flex justify-between gap-2 border-b border-[#eef0f4] py-1 last:border-0"><span>{model.name}{model.backorder && <span className="ml-1 text-[#b07400]">· backorder</span>}</span><code className="text-[#9297a4]">{model.reference}</code></li>)}</ul>
+      <p className="mt-2 text-[10px] leading-4 text-[#9297a4]">The list comes from Printeers and updates automatically: models that Printeers stops selling disappear from the shop. Backorder models can be ordered but may ship a few days later.</p>
+    </>}
   </div>;
 }
