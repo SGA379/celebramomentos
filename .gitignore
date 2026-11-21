@@ -5,6 +5,15 @@ out
 npm-debug.log*
 .vercel
 
-# Environment files hold secrets; only the placeholder template is committed
+# Environment files hold secrets and are never committed.
+#   .env                   → local development (test / sandbox keys)
+#   .env.production.vercel → live keys, imported into Vercel's Production environment only
+# (.env* already covers these; listed explicitly so nobody removes them by accident.)
+.env
+.env.local
+.env.production
+.env.production.local
+.env.production.vercel
+.env.development.local
+.env.test.local
 .env*
-!.env.example

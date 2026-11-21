@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
+    "env:check": "node scripts/check-env.mjs --profile local",
+    "env:check:production": "node scripts/check-env.mjs --profile production",
     "postinstall": "prisma generate",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
