@@ -8,6 +8,7 @@ import { itemCustomization } from "@/lib/server/orders";
 import { podAutoSubmit, podMode, webhookSecret } from "@/lib/pod/config";
 import { attachDesignPages, attachPrintFile, cancelFulfillment, confirmDraft, prepareFulfillments, readArtwork, readIssues, refreshReadiness, resetPrintFile, submitFulfillment, syncFulfillment, syncStaleFulfillments } from "@/lib/pod/fulfillment";
 import { podAdapter } from "@/lib/pod/providers";
+import { checkGelatoApi } from "@/lib/pod/providers/gelato";
 import { itemShipping, latestEvent, readTracking } from "@/lib/pod/tracking";
 import { registerWebhook, webhookSetupState } from "@/lib/pod/webhooks";
 import { POD_PROVIDERS } from "@/lib/products";
@@ -75,6 +76,7 @@ export async function GET(request: NextRequest) {
         webhooks: Boolean(webhookSecret()),
         cron: Boolean(process.env.CRON_SECRET && process.env.CRON_SECRET.trim().length >= 16),
         webhookSetup: await webhookSetupState(),
+        apiHealth: { GELATO: await checkGelatoApi() },
         providers: Object.fromEntries(POD_PROVIDERS.map((name) => [name, podAdapter(name).configurationProblem(mode)])),
       },
       counts: Object.fromEntries(counts.map((row) => [row.status, row._count._all])),

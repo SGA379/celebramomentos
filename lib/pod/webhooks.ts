@@ -104,6 +104,12 @@ export async function handlePodWebhook(provider: PodProvider, request: Request) 
 export type WebhookSetup = { provider: PodProvider; state: "ready" | "action_needed" | "unknown"; detail: string };
 
 const publicHttps = (url: string | null) => Boolean(url && /^https:\/\//.test(url) && !/\/\/(localhost|127\.|0\.0\.0\.0)/.test(url));
+const GELATO_WEBHOOK_PATH = "/api/webhooks/gelato";
+
+export function gelatoWebhookSetupState(secret = webhookSecret()): WebhookSetup {
+  const noSecret = secret ? "" : " (without POD_WEBHOOK_SECRET: accepted as a throttled hint)";
+  return { provider: "GELATO", state: "unknown", detail: `App endpoint is ${GELATO_WEBHOOK_PATH}${noSecret}. Gelato dashboard registration and delivery cannot be verified through Gelato's API` };
+}
 
 export async function webhookSetupState(): Promise<WebhookSetup[]> {
   const secret = webhookSecret();
@@ -126,7 +132,7 @@ export async function webhookSetupState(): Promise<WebhookSetup[]> {
   return [
     { provider: "PRODIGI", state: "ready", detail: `Sent with every order as its callbackUrl, and /api/webhooks/prodigi in the Prodigi dashboard${noSecret}` },
     printful,
-    { provider: "GELATO", state: "unknown", detail: `Set in the Gelato dashboard (Developer → Webhooks) to /api/webhooks/gelato${noSecret}; Gelato's API cannot confirm it` },
+    gelatoWebhookSetupState(secret),
     { provider: "PRINTEERS", state: printeersConfig(podMode()).webhookSecret ? "ready" : "action_needed", detail: printeersConfig(podMode()).webhookSecret
       ? `Signed webhook secret set (endpoint registered in the Printeers dashboard). Also set the store's "API Callback URL" to /api/webhooks/printeers${noSecret}`
       : `In the Printeers dashboard set the store's "API Callback URL" to /api/webhooks/printeers${noSecret}; optionally add a signed webhook (Settings → Webhooks) and put its secret in PRINTEERS_WEBHOOK_SECRET / PRINTEERS_TEST_WEBHOOK_SECRET` },
