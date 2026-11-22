@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PodApiError, podRequest, redact } from "@/lib/pod/http";
 import { INACTIVE_PROVIDER, podAdapter } from "@/lib/pod/providers";
 import { internationalPhone, printeersAdapter, printeersIdentifier, printeersStatus, splitName, splitStreet } from "@/lib/pod/providers/printeers";
-import { gelatoAdapter, parseGelatoOrder } from "@/lib/pod/providers/gelato";
+import { checkGelatoApi, gelatoAdapter, parseGelatoOrder } from "@/lib/pod/providers/gelato";
 import { parsePrintfulOrder, printfulAdapter } from "@/lib/pod/providers/printful";
 import { parseProdigiOrder, prodigiAdapter } from "@/lib/pod/providers/prodigi";
 import type { SubmissionInput } from "@/lib/pod/types";
@@ -79,6 +79,32 @@ describe("Prodigi", () => {
 });
 
 describe("Gelato", () => {
+  it("checks authenticated API connectivity through the supported read-only search API", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: { orders: [] } }]);
+    await expect(checkGelatoApi(impl)).resolves.toEqual({ state: "connected", detail: "Gelato API is authenticated and reachable" });
+    expect(calls[0].url).toBe("https://order.gelatoapis.com/v4/orders:search");
+    expect(calls[0].init.method).toBe("POST");
+    expect(headersOf(calls[0]).get("X-API-KEY")).toBe("gelato-key");
+    expect(bodyOf(calls[0])).toEqual({ limit: 1 });
+  });
+
+  it("reports missing API credentials separately from webhook setup", async () => {
+    delete process.env.GELATO_API_KEY;
+    const fetchImpl = vi.fn();
+    await expect(checkGelatoApi(fetchImpl)).resolves.toEqual({ state: "not_configured", detail: "GELATO_API_KEY is not set" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reports API authentication or connectivity failures without changing webhook state", async () => {
+    const { impl } = fakeFetch([{ status: 401, body: { message: "invalid key" } }]);
+    await expect(checkGelatoApi(impl)).resolves.toMatchObject({ state: "unavailable", detail: expect.stringContaining("GELATO answered HTTP 401") });
+  });
+
+  it("does not treat an unexpected successful response as a connected API", async () => {
+    const { impl } = fakeFetch([{ status: 200, body: { ok: true } }]);
+    await expect(checkGelatoApi(impl)).resolves.toEqual({ state: "unavailable", detail: "Gelato returned an unexpected API response" });
+  });
+
   it("creates drafts in draft mode and real orders in live mode", async () => {
     const { impl, calls } = fakeFetch([{ status: 200, body: { id: "g1", orderType: "draft", fulfillmentStatus: "draft" } }, { status: 200, body: { id: "g2", orderType: "order", fulfillmentStatus: "created" } }]);
     await gelatoAdapter(impl).submit(input("draft", "wall_hanging_poster_x"));

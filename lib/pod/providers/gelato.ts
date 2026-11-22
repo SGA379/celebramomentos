@@ -20,6 +20,11 @@ type GelatoOrder = {
   shipment?: { id?: string; shipmentMethodName?: string | null; minDeliveryDate?: string | null; maxDeliveryDate?: string | null; fulfillmentCountry?: string | null; packages?: GelatoPackage[] | null } | null;
 };
 
+export type GelatoApiHealth = {
+  state: "connected" | "not_configured" | "unavailable";
+  detail: string;
+};
+
 const STATUS: [RegExp, PodFulfillmentStatus][] = [
   [/cancel/, "CANCELLED"],
   [/^failed$/, "FAILED"],
@@ -141,6 +146,26 @@ export function buildGelatoOrder(input: SubmissionInput) {
       ...(input.recipient.phone ? { phone: input.recipient.phone } : {}),
     },
   };
+}
+
+// This checks only Gelato API credentials and reachability. Gelato does not expose
+// dashboard webhook registration through this API, so webhook setup remains a
+// separate informational state in lib/pod/webhooks.ts.
+export async function checkGelatoApi(fetchImpl?: FetchLike): Promise<GelatoApiHealth> {
+  const { apiKey, baseUrl } = gelatoConfig();
+  if (!apiKey) return { state: "not_configured", detail: "GELATO_API_KEY is not set" };
+  try {
+    const { body } = await podRequest<{ orders?: unknown }>("GELATO", `${baseUrl}/v4/orders:search`, {
+      method: "POST",
+      body: JSON.stringify({ limit: 1 }),
+      fetchImpl,
+      headers: { "X-API-KEY": apiKey, "Content-Type": "application/json", Accept: "application/json" },
+    });
+    if (!body || !Array.isArray(body.orders)) return { state: "unavailable", detail: "Gelato returned an unexpected API response" };
+    return { state: "connected", detail: "Gelato API is authenticated and reachable" };
+  } catch (reason) {
+    return { state: "unavailable", detail: reason instanceof Error ? reason.message.slice(0, 160) : "Gelato API could not be reached" };
+  }
 }
 
 export function gelatoAdapter(fetchImpl?: FetchLike): PodAdapter {

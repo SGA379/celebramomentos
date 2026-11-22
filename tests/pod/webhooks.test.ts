@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWebhook, validWebhookToken } from "@/lib/pod/webhooks";
+import { gelatoWebhookSetupState, parseWebhook, validWebhookToken } from "@/lib/pod/webhooks";
 
 describe("webhook authentication", () => {
   it("accepts only the exact secret", () => {
@@ -30,5 +30,21 @@ describe("webhook payloads", () => {
 
   it("returns nothing usable for unrelated payloads", () => {
     expect(parseWebhook("GELATO", { hello: "world" })).toMatchObject({ providerOrderId: null, reference: null });
+  });
+});
+
+describe("Gelato webhook setup", () => {
+  it("keeps dashboard registration informational even when the app endpoint is known", () => {
+    expect(gelatoWebhookSetupState(null)).toEqual({
+      provider: "GELATO",
+      state: "unknown",
+      detail: expect.stringContaining("App endpoint is /api/webhooks/gelato"),
+    });
+    expect(gelatoWebhookSetupState(null).detail).toContain("registration and delivery cannot be verified");
+  });
+
+  it("does not claim webhook delivery is verified when the app has a secret", () => {
+    expect(gelatoWebhookSetupState("s".repeat(32)).state).toBe("unknown");
+    expect(gelatoWebhookSetupState("s".repeat(32)).detail).not.toContain("without POD_WEBHOOK_SECRET");
   });
 });

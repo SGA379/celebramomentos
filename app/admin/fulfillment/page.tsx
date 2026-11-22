@@ -23,7 +23,7 @@ type Fulfillment = {
   order: { id: string; number: string; email: string; status: string; totalCents: number; createdAt: string; shippingAddress: Record<string, string> };
   items: Item[];
 };
-type Data = { config: { mode: "draft" | "live"; autoSubmit: boolean; webhooks: boolean; cron: boolean; providers: Record<PodProvider, string | null>; webhookSetup?: { provider: PodProvider; state: "ready" | "action_needed" | "unknown"; detail: string }[] }; counts: Record<string, number>; unprepared: { id: string; number: string; email: string; createdAt: string; totalCents: number }[]; fulfillments: Fulfillment[] };
+type Data = { counts: Record<string, number>; unprepared: { id: string; number: string; email: string; createdAt: string; totalCents: number }[]; fulfillments: Fulfillment[] };
 
 const STATUS_LABEL: Record<string, string> = { NEEDS_ATTENTION: "Needs attention", READY: "Ready", SUBMITTING: "Sending", SUBMITTED: "Sent", IN_PRODUCTION: "In production", SHIPPED: "Shipped", DELIVERED: "Delivered", CANCELLED: "Cancelled", FAILED: "Failed" };
 const STATUS_TONE: Record<string, "green" | "amber" | "rose" | "slate"> = { NEEDS_ATTENTION: "amber", READY: "slate", SUBMITTING: "slate", SUBMITTED: "green", IN_PRODUCTION: "green", SHIPPED: "green", DELIVERED: "green", CANCELLED: "rose", FAILED: "rose" };
@@ -80,24 +80,8 @@ export default function AdminFulfillmentPage() {
   };
 
   const selected = data?.fulfillments.find((item) => item.id === selectedId) || null;
-  const config = data?.config;
 
   return <AdminShell><AdminPageHeader eyebrow="FULFILMENT" title="Print orders" body="Paid orders split by print shop (Prodigi, Gelato, Printful, Printeers): what was sent, its status and tracking, and anything that needs you." />
-    {config && <section className={`mt-6 rounded-2xl border p-4 text-sm ${config.mode === "live" ? "border-[#bfe6cf] bg-[#f3fbf6]" : "border-[#f0dfaa] bg-[#fffbec]"}`}>
-      <p className="font-black">{config.mode === "live" ? "Live mode — print orders are real and charged by the print shops." : "Draft mode — nothing is produced or charged: Gelato and Printful orders are drafts, Prodigi uses its sandbox, Printeers uses its test environment."}</p>
-      <p className="mt-1 text-xs font-bold text-[#737b90]">Automatic sending after payment: {config.autoSubmit ? "on" : "off"} · Webhook token: {config.webhooks ? "set" : "not set (webhooks still work as throttled hints)"} · Daily sync job: {config.cron ? "set up" : "CRON_SECRET missing"}</p>
-      <div className="mt-3 flex flex-wrap gap-2">{PROVIDERS.map((name) => <span key={name} title={config.providers[name] || "Ready"} className={`rounded-full px-3 py-1 text-[11px] font-black ${config.providers[name] ? "bg-[#fff0e8] text-[#c94758]" : "bg-[#e8f5ed] text-[#24714b]"}`}>{POD_PROVIDER_LABELS[name]}: {config.providers[name] ? "not available" : "ready"}</span>)}</div>
-      {PROVIDERS.filter((name) => config.providers[name]).map((name) => <p key={name} className="mt-1 text-[11px] text-[#737b90]"><b>{POD_PROVIDER_LABELS[name]}</b>: {config.providers[name]}</p>)}
-      {config.webhookSetup && <div className="mt-3 border-t border-black/5 pt-3">
-        <p className="text-[11px] font-black uppercase tracking-[.12em] text-[#737b90]">Status updates from the print shops (webhooks)</p>
-        {config.webhookSetup.map((item) => <p key={item.provider} className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[#59627b]">
-          <span className={`rounded-full px-2 py-0.5 font-black ${item.state === "ready" ? "bg-[#e8f5ed] text-[#24714b]" : item.state === "action_needed" ? "bg-[#fff0e8] text-[#c94758]" : "bg-[#f1f2f5] text-[#59627b]"}`}>{POD_PROVIDER_LABELS[item.provider]}: {item.state === "ready" ? "ready" : item.state === "action_needed" ? "action needed" : "check"}</span>
-          <span>{item.detail}</span>
-          {item.provider === "PRINTFUL" && item.state === "action_needed" && <button type="button" disabled={Boolean(busy)} onClick={() => act("webhook", { action: "register_webhook", provider: "PRINTFUL" }, "Printful webhook registered")} className="rounded-full bg-[#182443] px-3 py-1 text-[11px] font-black text-white disabled:opacity-50">Register with Printful</button>}
-        </p>)}
-        <p className="mt-1 text-[11px] text-[#9297a4]">Without webhooks, statuses still update: when this page or the orders page is opened, and by the daily job.</p>
-      </div>}
-    </section>}
 
     {data && data.unprepared.length > 0 && <section className="mt-4 rounded-2xl border border-[#e4e7ee] bg-white p-4">
       <p className="text-sm font-black">Paid orders without print orders ({data.unprepared.length})</p>
@@ -129,7 +113,7 @@ export default function AdminFulfillmentPage() {
             <td className="max-w-[260px] truncate px-5 py-4 text-xs text-[#c94758]" title={item.lastError || ""}>{item.lastError || ""}</td>
           </tr>)}</tbody></table></div>}
     </section>
-    {selected && <Detail item={selected} mode={config?.mode || "draft"} busy={busy} onClose={() => setSelectedId(null)} act={act} onToast={setToast} />}
+    {selected && <Detail item={selected} mode={selected.mode === "live" ? "live" : "draft"} busy={busy} onClose={() => setSelectedId(null)} act={act} onToast={setToast} />}
     {toast && <Toast message={toast} onClose={() => setToast("")} />}
   </AdminShell>;
 }
