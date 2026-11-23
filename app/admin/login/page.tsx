@@ -12,11 +12,13 @@ export default function AdminLoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get("returnTo");
     if (requested?.startsWith("/")) setReturnTo(requested);
+    if (new URLSearchParams(window.location.search).get("changed") === "password") setNotice("Password changed successfully. Sign in with your new password.");
   }, []);
 
   const submitting = useRef(false);
@@ -70,6 +72,7 @@ export default function AdminLoginPage() {
           <form onSubmit={submit} className="mt-7 space-y-5">
             <label className="block text-xs font-black uppercase tracking-[.1em] text-[#59627b]">Email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className={input} autoComplete="username" placeholder="admin@example.com" /></label>
             <label className="block text-xs font-black uppercase tracking-[.1em] text-[#59627b]">Password<span className="relative mt-2 block"><input required type={show ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} className={`${input} !mt-0 pr-20`} autoComplete="current-password" placeholder="Your admin password" /><button type="button" onClick={() => setShow((value) => !value)} aria-label={show ? "Hide password" : "Show password"} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full px-3 py-1.5 text-[11px] font-black normal-case tracking-normal text-[#737b90] transition hover:bg-[#eef0f4] hover:text-[#182443]">{show ? "Hide" : "Show"}</button></span></label>
+            {notice && <p role="status" className="rounded-xl border border-[#cde5d5] bg-[#effaf1] px-4 py-3 text-xs font-bold text-[#277046]">{notice}</p>}
             {error && <p role="alert" className="rounded-xl border border-[#f3c6c2] bg-[#fff0e8] px-4 py-3 text-xs font-bold text-[#c94758]">{error}</p>}
             <LoadingButton type="submit" loading={loading} loadingLabel="Signing in…" className="flex w-full items-center justify-center gap-2 rounded-full bg-[#182443] px-5 py-4 text-sm font-black text-white shadow-[0_10px_24px_rgba(24,36,67,.25)] transition hover:bg-[#ee5264] hover:shadow-[0_10px_24px_rgba(238,82,100,.3)] disabled:cursor-wait disabled:opacity-60">Sign in<Icon name="arrow" size={16} /></LoadingButton>
           </form>

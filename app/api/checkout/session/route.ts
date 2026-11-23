@@ -16,9 +16,10 @@ export async function POST(request: NextRequest) {
   try {
     assertStripeConfigured();
     const input = customerCheckoutSchema.parse(await request.json());
-    if (input.payment !== "card") return jsonError("Only Stripe card test payments are enabled.", 400);
+    if (input.payment !== "card") return jsonError("Only Stripe card payments are enabled on this route.", 400);
     const idempotencyKey = request.headers.get("idempotency-key")?.trim() || randomUUID();
     const existing = await prisma.order.findUnique({ where: { checkoutIdempotencyKey: idempotencyKey }, include: { payments: true } });
+    if (existing && existing.customerId !== customer.id) return jsonError("This payment attempt belongs to another customer.", 409);
     if (existing?.payments[0]?.stripeCheckoutId) {
       const session = await stripe.checkout.sessions.retrieve(existing.payments[0].stripeCheckoutId);
       return NextResponse.json({ orderId: existing.id, orderNumber: existing.number, checkoutUrl: session.url });

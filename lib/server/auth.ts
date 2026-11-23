@@ -22,8 +22,8 @@ export async function verifyPassword(password: string, hash: string) {
   return bcrypt.compare(password, hash);
 }
 
-export async function createAdminSession(adminId: string, role: string, local = false) {
-  return new SignJWT({ role, local, ...(local ? { email: process.env.ADMIN_EMAIL } : {}) })
+export async function createAdminSession(adminId: string) {
+  return new SignJWT({ typ: "admin" })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(adminId)
     .setIssuedAt()
@@ -37,19 +37,17 @@ export async function getAdminSession() {
   try {
     const { payload } = await jwtVerify(token, secret());
     if (!payload.sub) return null;
-    if (payload.local === true && process.env.NODE_ENV !== "production" && payload.email === process.env.ADMIN_EMAIL) {
-      return { id: "local-owner", email: process.env.ADMIN_EMAIL, name: "Local owner", role: "OWNER" as const };
-    }
-    const admin = await prisma.adminUser.findFirst({ where: { id: payload.sub, active: true }, select: { id: true, email: true, name: true, role: true } });
+    if (payload.typ !== "admin") return null;
+    const admin = await prisma.adminUser.findFirst({ where: { id: payload.sub, active: true }, select: { id: true, email: true, name: true } });
     return admin;
   } catch {
     return null;
   }
 }
 
-export async function requireAdmin(roles?: string[]) {
+export async function requireAdmin(_roles?: string[]) {
   const admin = await getAdminSession();
-  if (!admin || (roles && !roles.includes(admin.role))) {
+  if (!admin) {
     return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }), admin: null };
   }
   return { error: null, admin };
