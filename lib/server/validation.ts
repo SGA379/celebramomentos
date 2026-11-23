@@ -3,6 +3,18 @@ import { CARD_SIZE_IDS } from "@/lib/data";
 import { CARD_TEMPLATE_SLUGS, MAX_PRODUCT_PHOTOS, MAX_SELECTION_PHOTOS, POD_PROVIDERS, PRODUCT_KINDS } from "@/lib/products";
 
 export const adminLoginSchema = z.object({ email: z.string().email(), password: z.string().min(8).max(200) });
+export const adminPasswordChangeSchema = z.object({
+  action: z.literal("change-password"),
+  currentPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(12).max(200),
+  confirmPassword: z.string().min(12).max(200),
+}).refine((value) => value.newPassword === value.confirmPassword, { path: ["confirmPassword"], message: "Passwords do not match" });
+export const adminProfileUpdateSchema = z.object({
+  action: z.literal("update-profile"),
+  currentPassword: z.string().min(1).max(200),
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(160),
+});
 export const customerRegisterSchema = z.object({
   name: z.string().trim().min(2).max(120),
   email: z.string().email().max(160),

@@ -16,13 +16,12 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  const { error, admin } = await requireAdmin(["OWNER", "ADMIN"]);
+  const { error } = await requireAdmin(["OWNER", "ADMIN"]);
   if (error) return error;
   try {
     const input = settingSchema.parse(await request.json());
     // Managed only through /api/admin/homepage-images, which validates the uploaded image.
     if (input.key === HOMEPAGE_IMAGES_KEY) return jsonError("Homepage images are managed in Homepage images", 400);
-    if (input.isSecret && !admin!.role.includes("OWNER")) return jsonError("Only the owner can change secret settings", 403);
     if (isSocialLinkKey(input.key)) {
       input.value = input.value.trim();
       if (input.value && !validSocialUrl(input.value)) return jsonError("Social links must be full https:// URLs", 400);

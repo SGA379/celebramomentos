@@ -86,7 +86,7 @@ if (profile === "local") {
   if (has("GELATO_API_KEY") || has("PRINTFUL_PRIVATE_TOKEN")) warn("Gelato / Printful have no sandbox: their keys reach real accounts (drafts only while POD_ORDER_MODE=draft)");
 } else {
   // ── Production: live only ────────────────────────────────────────────────────
-  require_(["DATABASE_URL", "AUTH_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "POD_WEBHOOK_SECRET", "CRON_SECRET", "PRODIGI_API_KEY", "GELATO_API_KEY", "PRINTFUL_PRIVATE_TOKEN", "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"]);
+  require_(["DATABASE_URL", "AUTH_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "POD_WEBHOOK_SECRET", "CRON_SECRET", "PRODIGI_API_KEY", "GELATO_API_KEY", "PRINTFUL_PRIVATE_TOKEN", "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"]);
   if (stripeKey && !isLiveStripe) error("STRIPE_SECRET_KEY is not a live key (sk_live_… / rk_live_…)");
   if (has("STRIPE_WEBHOOK_SECRET") && !/^whsec_/.test(get("STRIPE_WEBHOOK_SECRET"))) error("STRIPE_WEBHOOK_SECRET is not a Stripe signing secret (whsec_…)");
   if (paypalMode !== "live") error("PAYPAL_MODE must be \"live\" in production (it defaults to sandbox when unset)");
@@ -99,7 +99,6 @@ if (profile === "local") {
   TEST_ONLY.filter(has).forEach((n) => error(`${n} is a test/sandbox-only variable; do not set it in production`));
   if (has("ORDER_EMAIL_TEST_RECIPIENT")) warn("ORDER_EMAIL_TEST_RECIPIENT is set; it is only used for test payments");
   if (!/^https:\/\//.test(appUrl) || /localhost|127\.0\.0\.1/.test(appUrl)) error("NEXT_PUBLIC_APP_URL / APP_URL must be the public https address");
-  if ((get("ADMIN_PASSWORD") || "").length && get("ADMIN_PASSWORD").length < 12) error("ADMIN_PASSWORD is too short for production (12+ characters)");
   if ((get("POD_WEBHOOK_SECRET") || "").length && get("POD_WEBHOOK_SECRET").length < 24) error("POD_WEBHOOK_SECRET must be at least 24 characters");
   require_(["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"], warn);
   // Production must not share secrets or the database with local development (compared, never printed).
@@ -107,7 +106,7 @@ if (profile === "local") {
     const localFile = path.join(root, localName);
     if (!existsSync(localFile)) continue;
     const local = parseFile(localFile);
-    for (const name of ["DATABASE_URL", "AUTH_SECRET", "ADMIN_PASSWORD", "POD_WEBHOOK_SECRET", "CRON_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "PAYPAL_CLIENT_ID"]) {
+    for (const name of ["DATABASE_URL", "AUTH_SECRET", "POD_WEBHOOK_SECRET", "CRON_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "PAYPAL_CLIENT_ID"]) {
       if (has(name) && local[name] && local[name].trim() === get(name)) (name === "DATABASE_URL" ? warn : error)(`${name} is the same as in ${localName}${name === "DATABASE_URL" ? " (production and local development share one database)" : ""}`);
     }
   }
