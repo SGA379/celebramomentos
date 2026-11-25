@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
-import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_PAGES, monthGrid, monthName } from "@/lib/pod/calendar-pdf";
+import { boxPixels, buildCalendarPdf, calendarLayout, calendarPdfPage, CALENDAR_BLEED_MM, CALENDAR_PAGES, monthGrid, monthName, validateCalendarPdf } from "@/lib/pod/calendar-pdf";
 
 const A4 = { width: 210, height: 297 };
 const jpeg = new Uint8Array(readFileSync("public/images/magnet-photo-8.jpg"));
@@ -31,16 +31,28 @@ describe("calendar layout", () => {
 });
 
 describe("calendar PDF", () => {
-  it("has 14 pages (cover, 12 months, back), every page at the calendar's exact size", async () => {
+  it("has 14 pages with 4 mm bleed around the exact trim size", async () => {
     const bytes = await buildCalendarPdf({ page: A4, year: 2027, language: "es", monthPhotos: [jpeg, jpeg, jpeg, ...Array(9).fill(null)], coverPhoto: jpeg });
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPageCount()).toBe(CALENDAR_PAGES);
+    const output = calendarPdfPage(A4);
     for (const page of pdf.getPages()) {
-      const { width, height } = page.getSize();
-      expect(width).toBeCloseTo((210 * 72) / 25.4, 3);
-      expect(height).toBeCloseTo((297 * 72) / 25.4, 3);
+      expect(page.getWidth()).toBeCloseTo((output.width * 72) / 25.4, 3);
+      expect(page.getHeight()).toBeCloseTo((output.height * 72) / 25.4, 3);
     }
+    await expect(validateCalendarPdf(bytes, A4)).resolves.toMatchObject({ pages: CALENDAR_PAGES, pageMm: output, bleedMm: CALENDAR_BLEED_MM, bytes: bytes.byteLength });
     expect(pdf.getTitle()).toBe("Calendario 2027");
+  });
+
+  it("uses Gelato's A3 dimensions: 305 × 428 mm including 4 mm bleed", async () => {
+    const trim = { width: 297, height: 420 };
+    const bytes = await buildCalendarPdf({ page: trim, year: 2027, language: "es", monthPhotos: Array(12).fill(null), coverPhoto: null });
+    const pdf = await PDFDocument.load(bytes);
+    expect(calendarPdfPage(trim)).toEqual({ width: 305, height: 428 });
+    expect(pdf.getPages()).toHaveLength(14);
+    expect(pdf.getPages()[0].getWidth()).toBeCloseTo((305 * 72) / 25.4, 3);
+    expect(pdf.getPages()[0].getHeight()).toBeCloseTo((428 * 72) / 25.4, 3);
+    await expect(validateCalendarPdf(bytes, trim)).resolves.toMatchObject({ pageMm: { width: 305, height: 428 }, bleedMm: 4 });
   });
 
   it("works with Portuguese months (accents) and no photo at all, and refuses a wrong month count", async () => {

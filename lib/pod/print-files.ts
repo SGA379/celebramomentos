@@ -4,7 +4,7 @@
 import { cloudinaryObjectKey, uploadFileToCloudinary, uploadRemoteImageToCloudinary } from "@/lib/server/cloudinary";
 import { prisma } from "@/lib/server/prisma";
 import { compositeFileUrl, isCloudinaryUrl, printFileUrl, type PrintSpec } from "./artwork";
-import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_PAGES, type Box, type CalendarLanguage } from "./calendar-pdf";
+import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_MAX_BYTES, CALENDAR_PAGES, validateCalendarPdf, type Box, type CalendarLanguage } from "./calendar-pdf";
 
 export type StoredFile = { url: string; width: number; height: number };
 export type UploadedFile = { width: number; height: number; mimeType: string; kind: string };
@@ -65,18 +65,27 @@ export async function pdfDeliverable(url: string): Promise<{ ok: true } | { ok: 
   }
 }
 
-// A customer photo cut to a calendar photo box at 300 dpi (Cloudinary does the cropping, centred like the
-// studio preview), as JPEG bytes.
-// A calendar contains up to 14 full-page photos. q_75 keeps the source at a
-// print-appropriate resolution while staying below the 10 MB file limit used by
-// the Gelato order API for large A3 calendars.
-const CALENDAR_PHOTO_QUALITY = 75;
+// Gelato accepts at most 10 MiB for this PDF. Start at the professional 300 DPI target and step down
+// only when the complete PDF still exceeds the provider limit. The last profile remains suitable for
+// the calendar's physical size and is preferable to silently submitting an oversized file.
+const CALENDAR_IMAGE_PROFILES = [
+  { dpi: 300, quality: 75 },
+  { dpi: 300, quality: 65 },
+  { dpi: 240, quality: 70 },
+  { dpi: 200, quality: 65 },
+  { dpi: 150, quality: 60 },
+] as const;
 
-async function boxPhoto(url: string, box: Box) {
-  const { width, height } = boxPixels(box);
+function calendarMaxBytes() {
+  const configured = Number(process.env.GELATO_CALENDAR_MAX_PDF_BYTES);
+  return Number.isInteger(configured) && configured >= 1_000_000 ? configured : CALENDAR_MAX_BYTES;
+}
+
+async function boxPhoto(url: string, box: Box, profile: { dpi: number; quality: number }) {
+  const { width, height } = boxPixels(box, profile.dpi);
   const source = url.match(/^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(.+)$/);
   if (!source) throw new Error("A calendar photo is not an upload from this shop");
-  const response = await fetch(`${source[1]}c_fill,g_center,w_${width},h_${height},q_${CALENDAR_PHOTO_QUALITY},f_jpg/${source[2]}`, { cache: "no-store", signal: AbortSignal.timeout(45_000) });
+  const response = await fetch(`${source[1]}c_fill,g_center,w_${width},h_${height},q_${profile.quality},f_jpg/${source[2]}`, { cache: "no-store", signal: AbortSignal.timeout(45_000) });
   if (!response.ok) throw new Error(`A calendar photo could not be read (HTTP ${response.status})`);
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -88,11 +97,41 @@ export async function renderCalendarFile(input: { orderId: string; itemId: strin
   const layout = calendarLayout(input.pageMm);
   const usable = input.photos.map((url) => (url && isCloudinaryUrl(url) ? url : null));
   const cover = (input.cover && isCloudinaryUrl(input.cover) ? input.cover : null) ?? usable.find(Boolean) ?? null;
-  const [monthPhotos, coverPhoto] = await Promise.all([
-    Promise.all(usable.map((url) => (url ? boxPhoto(url, layout.month) : Promise.resolve(null)))),
-    cover ? boxPhoto(cover, layout.cover) : Promise.resolve(null),
-  ]);
-  const bytes = await buildCalendarPdf({ page: input.pageMm, year: input.year, language: input.language, monthPhotos, coverPhoto });
+  const maxBytes = calendarMaxBytes();
+  const optimizedPhotos = new Map<string, Promise<Uint8Array>>();
+  const photoFor = (url: string, box: Box, profile: { dpi: number; quality: number }) => {
+    const key = `${url}|${box.width}x${box.height}|${profile.dpi}|${profile.quality}`;
+    const existing = optimizedPhotos.get(key);
+    if (existing) return existing;
+    const request = boxPhoto(url, box, profile);
+    optimizedPhotos.set(key, request);
+    return request;
+  };
+
+  let bytes: Uint8Array | null = null;
+  let selected: { dpi: number; quality: number; attempt: number; validation: Awaited<ReturnType<typeof validateCalendarPdf>> } | null = null;
+  for (const [index, profile] of CALENDAR_IMAGE_PROFILES.entries()) {
+    const [monthPhotos, coverPhoto] = await Promise.all([
+      Promise.all(usable.map((url) => (url ? photoFor(url, layout.month, profile) : Promise.resolve(null)))),
+      cover ? photoFor(cover, layout.cover, profile) : Promise.resolve(null),
+    ]);
+    const candidate = await buildCalendarPdf({ page: input.pageMm, year: input.year, language: input.language, monthPhotos, coverPhoto });
+    try {
+      const validation = await validateCalendarPdf(candidate, input.pageMm, maxBytes);
+      selected = { dpi: profile.dpi, quality: profile.quality, attempt: index + 1, validation };
+      bytes = candidate;
+      console.info("[pod] calendar PDF validated", { itemId: input.itemId, attempt: index + 1, dpi: profile.dpi, quality: profile.quality, bytes: candidate.byteLength, pages: validation.pages, pageMm: validation.pageMm, bleedMm: validation.bleedMm });
+      break;
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "calendar PDF validation failed";
+      if (candidate.byteLength > maxBytes && message.includes("allows at most")) {
+        console.warn("[pod] calendar PDF exceeds provider limit; retrying", { itemId: input.itemId, attempt: index + 1, dpi: profile.dpi, quality: profile.quality, bytes: candidate.byteLength, maxBytes });
+        continue;
+      }
+      throw reason;
+    }
+  }
+  if (!bytes || !selected) throw new Error(`Calendar PDF remains above Gelato's ${maxBytes} byte limit after ${CALENDAR_IMAGE_PROFILES.length} optimization attempts`);
   const name = `${input.itemId}-${input.unit + 1}-${input.area}-calendar.pdf`;
   const uploaded = await uploadFileToCloudinary({ bytes, folder: `celebramomentos/print_file/${input.orderId}`, publicId: name, contentType: "application/pdf" });
   const objectKey = cloudinaryObjectKey(uploaded.publicId);
@@ -103,10 +142,10 @@ export async function renderCalendarFile(input: { orderId: string; itemId: strin
     mimeType: "application/pdf",
     sizeBytes: uploaded.bytes || bytes.byteLength,
     originalName: name,
-    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pages: CALENDAR_PAGES, pageMm: input.pageMm, year: input.year, language: input.language, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length, coverPhoto: Boolean(input.cover && isCloudinaryUrl(input.cover)) },
+    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pages: CALENDAR_PAGES, pageMm: input.pageMm, pdfPageMm: selected.validation.pageMm, bleedMm: selected.validation.bleedMm, dpi: selected.dpi, quality: selected.quality, optimizationAttempts: selected.attempt, bytes: bytes.byteLength, maxBytes, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length, coverPhoto: Boolean(input.cover && isCloudinaryUrl(input.cover)) },
   };
   await prisma.asset.upsert({ where: { objectKey }, create: { objectKey, ...data }, update: data });
-  return { url: uploaded.secureUrl, pages: CALENDAR_PAGES, bytes: data.sizeBytes };
+  return { url: uploaded.secureUrl, pages: CALENDAR_PAGES, bytes: data.sizeBytes, pageMm: selected.validation.pageMm, bleedMm: selected.validation.bleedMm, dpi: selected.dpi, quality: selected.quality, optimizationAttempts: selected.attempt };
 }
 
 // Files uploaded through this site, by URL, with the pixel size Cloudinary reported on upload.
