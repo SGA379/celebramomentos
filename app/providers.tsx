@@ -5,6 +5,7 @@ import "@/lib/translation-safe-dom";
 import { Provider } from "react-redux";
 import { useEffect, useState } from "react";
 import { CheckoutReconciler } from "@/components/checkout-reconciler";
+import { CartSynchronizer } from "@/components/cart-synchronizer";
 import { PendingCartResumer } from "@/components/pending-cart-resumer";
 import { hydrateCart, hydrateLanguage, markCartHydrated, store } from "@/lib/store";
 import { LANGUAGE_STORAGE_KEY, persistCart, readPersistedCartAsync } from "@/lib/mock-store";
@@ -37,5 +38,5 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     });
   }, [hydrated]);
 
-  return <Provider store={store}>{children}{hydrated && <><PendingCartResumer /><CheckoutReconciler /></>}</Provider>;
+  return <Provider store={store}>{children}{hydrated && <><CartSynchronizer /><PendingCartResumer /><CheckoutReconciler /></>}</Provider>;
 }

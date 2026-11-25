@@ -148,15 +148,23 @@ export default function CheckoutPage() {
       const existingResponse = await fetch("/api/cart", { cache: "no-store" });
       if (!existingResponse.ok) throw new Error("Inicia sesión para continuar al pago.");
       const existing = await existingResponse.json();
-      for (const item of existing.items || []) await fetch(`/api/cart?id=${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      const localIds = new Set(items.map((item) => item.id));
+      // Remove only stale lines already visible in this checkout. A product added
+      // from another device after this read is left alone and is not included in
+      // this payment attempt.
+      for (const item of existing.items || []) {
+        if (!localIds.has(item.id)) await fetch(`/api/cart?id=${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      }
+      const cartLineIds: string[] = [];
       for (const item of persistedItems) {
         const response = await fetch("/api/cart", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item) });
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || "No se pudo guardar la cesta");
+        if (body.item?.id) cartLineIds.push(body.item.id);
       }
       const idempotencyKey = `checkout-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       if (data.payment === "paypal") {
-        const response = await fetch("/api/checkout/paypal/order", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ ...data, discountCode: cart.discountCode }) });
+        const response = await fetch("/api/checkout/paypal/order", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ ...data, discountCode: cart.discountCode, cartLineIds }) });
         const body = await response.json();
         if (!response.ok || !body.approvalUrl) throw new Error(body.error || "No se pudo iniciar el pago con PayPal");
         // These lines leave the cart only once PayPal confirms the payment.
@@ -165,7 +173,7 @@ export default function CheckoutPage() {
         window.location.assign(body.approvalUrl);
         return;
       }
-      const response = await fetch("/api/checkout/session", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ ...data, discountCode: cart.discountCode }) });
+      const response = await fetch("/api/checkout/session", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ ...data, discountCode: cart.discountCode, cartLineIds }) });
       const body = await response.json();
       if (!response.ok || !body.checkoutUrl) throw new Error(body.error || "No se pudo iniciar el pago con Stripe");
       // These lines leave the cart only once Stripe confirms the payment.

@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
       card: input.card as CartItem["card"],
     };
     const saved = await upsertCartLine(customer.id, item);
-    return NextResponse.json({ item: saved }, { status: item.id ? 200 : 201 });
+    return NextResponse.json({ item: saved, items: (await getCustomerCart(customer.id)).items }, { status: item.id ? 200 : 201 });
   } catch (reason) {
     return handleApiError(reason);
   }
@@ -56,6 +56,10 @@ export async function PATCH(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { error, customer } = await requireCustomer();
   if (error) return error;
+  if (request.nextUrl.searchParams.get("all") === "1") {
+    await prisma.cartLine.deleteMany({ where: { customerId: customer.id } });
+    return NextResponse.json({ items: [] });
+  }
   const id = request.nextUrl.searchParams.get("id");
   if (!id) return jsonError("Cart item id is required");
   await prisma.cartLine.deleteMany({ where: { id, customerId: customer.id } });

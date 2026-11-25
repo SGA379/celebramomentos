@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
 import { LoadingButton } from "@/components/loading-button";
 import { BrandLoader } from "@/components/loading";
-import { clearSessionUser, getSessionUser } from "@/lib/client-session";
+import { clearSessionUser, getSessionUser, notifySessionChanged } from "@/lib/client-session";
 import { STAGE_LABEL, type OrderStage } from "@/lib/order-progress";
 import { PageIntro, Price, SiteFooter, SiteHeader, StatusBadge, Toast } from "@/components/site";
 
@@ -67,13 +67,13 @@ export default function AccountPage() {
       const response = await fetch(mode === "login" ? "/api/auth/login" : "/api/auth/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(mode === "login" ? { email, password } : { name, email, password }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "No se pudo completar la operación");
-      await loadAccount(true); setToast(mode === "login" ? "Sesión iniciada." : "Cuenta creada correctamente.");
+      await loadAccount(true); notifySessionChanged(); setToast(mode === "login" ? "Sesión iniciada." : "Cuenta creada correctamente.");
       if (returnTo !== "/account") router.push(returnTo);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "No se pudo completar la operación"); }
     finally { authLock.current = false; setBusy(false); }
   };
 
-  const logout = async () => { const response = await fetch("/api/auth/logout", { method: "POST" }); if (!response.ok) throw new Error("No se pudo cerrar la sesión. Inténtalo de nuevo."); clearSessionUser(); setUser(null); setOrders([]); setMessages([]); setToast("Sesión cerrada."); };
+  const logout = async () => { const response = await fetch("/api/auth/logout", { method: "POST" }); if (!response.ok) throw new Error("No se pudo cerrar la sesión. Inténtalo de nuevo."); clearSessionUser(); notifySessionChanged(); setUser(null); setOrders([]); setMessages([]); setToast("Sesión cerrada."); };
   const saveProfile = async () => {
     setBusy(true); setError("");
     try { const response = await fetch("/api/auth/me", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, email }) }); const body = await response.json(); if (!response.ok) throw new Error(body.error || "No se pudo guardar el perfil"); void getSessionUser({ refresh: true }); setUser(body.user); setEditing(false); setToast("Perfil actualizado."); }

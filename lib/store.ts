@@ -1,10 +1,11 @@
 "use client";
 
-import { configureStore, createSlice, PayloadAction } from "@reduxjs/toolkit";
+import { configureStore, createSlice, Middleware, PayloadAction } from "@reduxjs/toolkit";
 import { CARD_SIZE_IDS, DEFAULT_CARD_SIZE, DELIVERY_METHOD, resolveFrameId, type CardSize, type DeliveryMethod, type DesignCategoryId, type RecipientMode } from "./data";
 import type { ImageCrop, MugCrops } from "./crop";
 import type { StudioProductKind } from "./products";
 import { defaultEmojiPosition, type EmojiElement, type EmojiPosition, type EmojiTone } from "./emojis";
+import { enqueueCartMutation, isCartSyncReady } from "./cart-sync";
 
 export type CardCustomization = {
     categoryId: DesignCategoryId;
@@ -103,6 +104,10 @@ export type CartState = {
   card: CardCustomization;
   items: CartItem[];
   discountCode: string;
+  // null means the browser currently holds a guest cart; a customer id means
+  // these lines came from that account and must never be merged into another one.
+  cartOwnerId: string | null;
+  cartSyncStatus: "idle" | "syncing" | "error";
   // True once the cart saved on this device has been loaded (pages that read the draft on first load wait for it).
   hydrated?: boolean;
 };
@@ -143,6 +148,8 @@ const initialState: CartState = {
   },
   items: [],
   discountCode: "",
+  cartOwnerId: null,
+  cartSyncStatus: "idle",
   hydrated: false,
 };
 
@@ -232,6 +239,9 @@ const cartSlice = createSlice({
     clearCartItems: (state) => { state.items = []; },
     // After a paid order: removes the lines that were bought (lines added since then stay).
     removeCartItems: (state, action: PayloadAction<string[]>) => { const bought = new Set(action.payload); state.items = state.items.filter((item) => !bought.has(item.id)); },
+    replaceCartItems: (state, action: PayloadAction<CartItem[]>) => { state.items = action.payload; },
+    setCartOwner: (state, action: PayloadAction<string | null>) => { state.cartOwnerId = action.payload; },
+    setCartSyncStatus: (state, action: PayloadAction<CartState["cartSyncStatus"]>) => { state.cartSyncStatus = action.payload; },
     setAllItemsDelivery: (state, action: PayloadAction<DeliveryMethod>) => {
       state.card.delivery = action.payload;
       state.items.forEach((item) => { item.card.delivery = action.payload; });
@@ -262,7 +272,7 @@ const cartSlice = createSlice({
             card: cloneCard(cleanCard({ ...state.card, ...item.card, frameId: resolveFrameId(item.card.frameId), delivery: DELIVERY_METHOD })),
           }))
         : [];
-      return { card, items, discountCode: typeof action.payload?.discountCode === "string" ? action.payload.discountCode : "", hydrated: true };
+      return { card, items, discountCode: typeof action.payload?.discountCode === "string" ? action.payload.discountCode : "", cartOwnerId: action.payload?.cartOwnerId || null, cartSyncStatus: "idle", hydrated: true };
     },
     // Nothing was saved on this device: the (empty) cart is ready as it is.
     markCartHydrated: (state) => { state.hydrated = true; },
@@ -326,13 +336,45 @@ export const {
   removeCartItem,
   clearCartItems,
   removeCartItems,
+  replaceCartItems,
+  setCartOwner,
+  setCartSyncStatus,
   setAllItemsDelivery,
   hydrateCart,
   markCartHydrated,
   resetCart,
 } = cartSlice.actions;
 export const { setLanguage, hydrateLanguage } = languageSlice.actions;
-export const store = configureStore({ reducer: { cart: cartSlice.reducer, language: languageSlice.reducer } });
+
+const accountCartMiddleware: Middleware = ({ dispatch, getState }) => (next) => (action) => {
+  const result = next(action);
+  if (typeof window === "undefined") return result;
+  const type = (action as { type?: string }).type;
+  const cart = getState().cart as CartState;
+  const owner = cart.cartOwnerId;
+  if (!owner || !isCartSyncReady(owner)) return result;
+  const apply = (items: CartItem[]) => { dispatch(replaceCartItems(items)); dispatch(setCartSyncStatus("idle")); };
+  const failed = () => dispatch(setCartSyncStatus("error"));
+  if (type === "cart/saveCartItem") {
+    const id = (action as { payload?: { id?: string } }).payload?.id;
+    const item = id ? cart.items.find((current) => current.id === id) : cart.items[cart.items.length - 1];
+    if (item) { dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "save", item }, apply, failed); }
+  } else if (type === "cart/setCartItemQuantity") {
+    const payload = (action as { payload: { id: string; quantity: number } }).payload;
+    dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "quantity", id: payload.id, quantity: payload.quantity }, apply, failed);
+  } else if (type === "cart/removeCartItem") {
+    dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "remove", id: (action as { payload: string }).payload }, apply, failed);
+  } else if (type === "cart/removeCartItems") {
+    dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "remove-many", ids: (action as { payload: string[] }).payload }, apply, failed);
+  } else if (type === "cart/clearCartItems") {
+    dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "clear" }, apply, failed);
+  } else if (type === "cart/setAllItemsDelivery") {
+    dispatch(setCartSyncStatus("syncing")); enqueueCartMutation(owner, { type: "save-many", items: cart.items }, apply, failed);
+  }
+  return result;
+};
+
+export const store = configureStore({ reducer: { cart: cartSlice.reducer, language: languageSlice.reducer }, middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(accountCartMiddleware) });
 // A separate store holding one card, so the card previews can render a design other
 // than the one open in the editor (used to export the card pages).
 export const createCardStore = (card: CardCustomization, language: LanguageState["language"]) => configureStore({ reducer: { cart: cartSlice.reducer, language: languageSlice.reducer }, preloadedState: { cart: { ...initialState, card: cloneCard(card) }, language: { language } } });

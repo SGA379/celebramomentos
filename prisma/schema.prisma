@@ -223,10 +223,14 @@ model CartLine {
   product        Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
   quantity       Int       @default(1)
   unitPriceCents Int
+  // Hash of the server-resolved product/customization. It lets guest carts merge
+  // safely without creating duplicate lines during concurrent sign-ins.
+  fingerprint    String?
   payload        Json
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   @@index([customerId])
+  @@unique([customerId, fingerprint])
 }
 
 model Address {
@@ -255,6 +259,9 @@ model Order {
   shippingCents         Int
   discountCents         Int           @default(0)
   totalCents            Int
+  // CartLine ids included in this order. Payment confirmation removes only these
+  // lines, preserving items added from another device while payment was pending.
+  cartLineIds           Json?
   shippingAddress       Json
   billingAddress        Json?
   checkoutIdempotencyKey String?       @unique

@@ -61,7 +61,8 @@ async function applyPayPalOrder(payment: CustomerPayment, paypalOrder: PayPalOrd
       }
       await tx.payment.update({ where: { id: payment.id }, data: { status: "SUCCEEDED", paypalCaptureId: capture.id, raw } });
       if (order.discountUsages.length) await tx.discount.update({ where: { id: order.discountUsages[0].discountId }, data: { usedCount: { increment: 1 } } });
-      if (order.customerId) await tx.cartLine.deleteMany({ where: { customerId: order.customerId } });
+      const lineIds = Array.isArray(order.cartLineIds) ? order.cartLineIds.filter((value): value is string => typeof value === "string") : [];
+      if (order.customerId) await tx.cartLine.deleteMany({ where: lineIds.length ? { customerId: order.customerId, id: { in: lineIds } } : { customerId: order.customerId } });
     });
     const refreshed = await prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true } });
     if (PAID_STATUSES.has(refreshed.status)) {
