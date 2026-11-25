@@ -67,11 +67,16 @@ export async function pdfDeliverable(url: string): Promise<{ ok: true } | { ok: 
 
 // A customer photo cut to a calendar photo box at 300 dpi (Cloudinary does the cropping, centred like the
 // studio preview), as JPEG bytes.
+// A calendar contains up to 14 full-page photos. q_75 keeps the source at a
+// print-appropriate resolution while staying below the 10 MB file limit used by
+// the Gelato order API for large A3 calendars.
+const CALENDAR_PHOTO_QUALITY = 75;
+
 async function boxPhoto(url: string, box: Box) {
   const { width, height } = boxPixels(box);
   const source = url.match(/^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(.+)$/);
   if (!source) throw new Error("A calendar photo is not an upload from this shop");
-  const response = await fetch(`${source[1]}c_fill,g_center,w_${width},h_${height},q_90,f_jpg/${source[2]}`, { cache: "no-store", signal: AbortSignal.timeout(45_000) });
+  const response = await fetch(`${source[1]}c_fill,g_center,w_${width},h_${height},q_${CALENDAR_PHOTO_QUALITY},f_jpg/${source[2]}`, { cache: "no-store", signal: AbortSignal.timeout(45_000) });
   if (!response.ok) throw new Error(`A calendar photo could not be read (HTTP ${response.status})`);
   return new Uint8Array(await response.arrayBuffer());
 }

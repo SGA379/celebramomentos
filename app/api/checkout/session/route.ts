@@ -32,15 +32,21 @@ export async function POST(request: NextRequest) {
       // The discount decided by the server (lib/server/discounts.ts) is given to Stripe as a
       // one-time coupon for exactly that amount, so Stripe charges order.totalCents. Without it Stripe
       // would charge the full price and the paid order would never match its total.
-      if (discountCents > 0) {
-        couponId = (await stripe.coupons.create({ amount_off: discountCents, currency: "eur", duration: "once", max_redemptions: 1, name: `Descuento ${discountCode}`.slice(0, 40), metadata: { orderId: order.id, code: discountCode || "" } }, { idempotencyKey: `coupon-${idempotencyKey}` })).id;
-      }
-      // Prefill Stripe Checkout with the details already given on our checkout page. If the
-      // Customer cannot be prepared the payment still goes ahead with just the email.
-      const stripeCustomer = await stripeCustomerFor(stripe, customer.id, input).catch((reason) => {
-        console.error("[stripe] customer prefill failed; continuing with email only", { orderId: order.id, message: reason instanceof Error ? reason.message.slice(0, 200) : "unknown" });
-        return null;
-      });
+      // The coupon and customer prefill are independent Stripe calls. Run them in
+      // parallel to reduce checkout latency; either result remains optional only
+      // where it was optional before.
+      const [createdCoupon, stripeCustomer] = await Promise.all([
+        discountCents > 0
+          ? stripe.coupons.create({ amount_off: discountCents, currency: "eur", duration: "once", max_redemptions: 1, name: `Descuento ${discountCode}`.slice(0, 40), metadata: { orderId: order.id, code: discountCode || "" } }, { idempotencyKey: `coupon-${idempotencyKey}` })
+          : Promise.resolve(null),
+        // Prefill Stripe Checkout with the details already given on our checkout page. If the
+        // Customer cannot be prepared the payment still goes ahead with just the email.
+        stripeCustomerFor(stripe, customer.id, input).catch((reason) => {
+          console.error("[stripe] customer prefill failed; continuing with email only", { orderId: order.id, message: reason instanceof Error ? reason.message.slice(0, 200) : "unknown" });
+          return null;
+        }),
+      ]);
+      couponId = createdCoupon?.id || null;
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
         ...(couponId ? { discounts: [{ coupon: couponId }] } : {}),

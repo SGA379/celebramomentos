@@ -4,7 +4,7 @@
 // Every size comes from the print shop specification the server uses to make the print file
 // (lib/pod/catalog.ts: mapOrderItem), never from a guessed table:
 // - Prodigi magnets: the SKU's print area (850 × 566 px);
-// - Printful mugs: the wrap print file (2700 × 1050 px for 11 oz, 2700 × 1140 px for 15 oz);
+// - Printful mugs: the full wrap print file (2700 × 1050 px for 11 oz, 2700 × 1140 px for 15 oz);
 // - Gelato posters: the printed size at Gelato's recommended 150 dpi;
 // - Gelato calendars: the cover and month photo boxes of the calendar PDF at 300 dpi;
 // - Printeers phone cases: the model's print area at 300 dpi (given per model by the Printeers API);
@@ -35,8 +35,6 @@ export function photoGuide(ctx: ItemContext, slot: "photo" | "cover" | "month" =
   }
   if (spec.kind !== "photo") return null;
   if (spec.fit === "fill" && spec.width && spec.height) return { width: spec.width, height: spec.height, dpi: null };
-  // Mug wraps: the photo is fitted inside the file on a white background.
-  if (spec.fit === "pad" && spec.width && spec.height) return { width: spec.width, height: spec.height, dpi: null, fit: "contain" };
   if (spec.fit === "aspect" && spec.minDpiSize) return { width: Math.round((spec.minDpiSize.widthMm / 25.4) * POSTER_DPI), height: Math.round((spec.minDpiSize.heightMm / 25.4) * POSTER_DPI), dpi: POSTER_DPI };
   return null;
 }

@@ -79,7 +79,7 @@ if (profile === "local") {
   if (isLiveStripe) error("STRIPE_SECRET_KEY is a LIVE key; local development must use sk_test_…");
   if (!has("STRIPE_WEBHOOK_SECRET")) warn("STRIPE_WEBHOOK_SECRET is a placeholder: the local Stripe webhook will be refused (use `stripe listen` to get one); the success page still confirms payments");
   if (paypalMode === "live") error("PAYPAL_MODE=live; local development must use the PayPal sandbox");
-  if (podMode === "live") error("POD_ORDER_MODE=live; local development must stay in draft mode");
+  if (!has("POD_ORDER_MODE") || podMode !== "draft") error("POD_ORDER_MODE must be explicitly set to draft for local development");
   LIVE_ONLY.filter(has).forEach((n) => error(`${n} is a live/production-only variable; remove it from local env files`));
   if (has("PRODIGI_SANDBOX_API_KEY") && !/^test_/.test(get("PRODIGI_SANDBOX_API_KEY"))) warn("PRODIGI_SANDBOX_API_KEY does not look like a Prodigi sandbox key (test_…)");
   require_(["PRODIGI_SANDBOX_API_KEY", "PRINTEERS_V1_TEST_PARTNER_CODE", "PRINTEERS_V1_TEST_API_KEY", "GELATO_API_KEY", "PRINTFUL_PRIVATE_TOKEN"], warn);
@@ -90,7 +90,7 @@ if (profile === "local") {
   if (stripeKey && !isLiveStripe) error("STRIPE_SECRET_KEY is not a live key (sk_live_… / rk_live_…)");
   if (has("STRIPE_WEBHOOK_SECRET") && !/^whsec_/.test(get("STRIPE_WEBHOOK_SECRET"))) error("STRIPE_WEBHOOK_SECRET is not a Stripe signing secret (whsec_…)");
   if (paypalMode !== "live") error("PAYPAL_MODE must be \"live\" in production (it defaults to sandbox when unset)");
-  if (podMode !== "live") warn("POD_ORDER_MODE is not \"live\": paid orders will only create test/draft print orders");
+  if (!has("POD_ORDER_MODE") || podMode !== "live") error("POD_ORDER_MODE must be explicitly set to live in production; refusing a sandbox/draft fallback");
   if (/^test_/.test(get("PRODIGI_API_KEY") || "")) error("PRODIGI_API_KEY is a Prodigi sandbox key (test_…)");
   const v2 = (get("PRINTEERS_API_VERSION") || "").toLowerCase() === "v2";
   if (v2) { require_(["PRINTEERS_API_KEY"]); if (has("PRINTEERS_API_KEY") && !/^Secret_Key_/.test(get("PRINTEERS_API_KEY"))) error("PRINTEERS_API_KEY is not a Printeers v2 secret key (Secret_Key_…)"); }
@@ -99,7 +99,11 @@ if (profile === "local") {
   TEST_ONLY.filter(has).forEach((n) => error(`${n} is a test/sandbox-only variable; do not set it in production`));
   if (has("ORDER_EMAIL_TEST_RECIPIENT")) warn("ORDER_EMAIL_TEST_RECIPIENT is set; it is only used for test payments");
   if (!/^https:\/\//.test(appUrl) || /localhost|127\.0\.0\.1/.test(appUrl)) error("NEXT_PUBLIC_APP_URL / APP_URL must be the public https address");
+  for (const name of ["PRODIGI_BASE_URL", "GELATO_BASE_URL", "PRINTFUL_BASE_URL", "PRINTEERS_BASE_URL", "PRINTEERS_V2_BASE_URL"]) {
+    if (has(name) && /sandbox|test-printeers|api\.test\.|localhost|127\.0\.0\.1/i.test(get(name))) error(`${name} points to a test/sandbox endpoint in production`);
+  }
   if ((get("POD_WEBHOOK_SECRET") || "").length && get("POD_WEBHOOK_SECRET").length < 24) error("POD_WEBHOOK_SECRET must be at least 24 characters");
+  require_(["PAYPAL_WEBHOOK_ID"], warn);
   require_(["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"], warn);
   // Production must not share secrets or the database with local development (compared, never printed).
   for (const localName of [".env", ".env.local"]) {
@@ -107,7 +111,7 @@ if (profile === "local") {
     if (!existsSync(localFile)) continue;
     const local = parseFile(localFile);
     for (const name of ["DATABASE_URL", "AUTH_SECRET", "POD_WEBHOOK_SECRET", "CRON_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "PAYPAL_CLIENT_ID"]) {
-      if (has(name) && local[name] && local[name].trim() === get(name)) (name === "DATABASE_URL" ? warn : error)(`${name} is the same as in ${localName}${name === "DATABASE_URL" ? " (production and local development share one database)" : ""}`);
+      if (has(name) && local[name] && local[name].trim() === get(name)) error(`${name} is the same as in ${localName}${name === "DATABASE_URL" ? " (production and local development must use separate databases)" : ""}`);
     }
   }
 }

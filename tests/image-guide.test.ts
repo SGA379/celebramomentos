@@ -11,9 +11,9 @@ describe("photo size recommendations", () => {
     expect(photoGuide(ctx({ kind: "MAGNET", provider: "PRODIGI" }))).toEqual({ width: 850, height: 566, dpi: null });
   });
 
-  it("mugs: the Printful wrap file of the chosen size (photo fitted inside)", () => {
-    expect(photoGuide(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Negro" } }))).toEqual({ width: 2700, height: 1050, dpi: null, fit: "contain" });
-    expect(photoGuide(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "15 oz", options: { color: "Negro" } }))).toEqual({ width: 2700, height: 1140, dpi: null, fit: "contain" });
+  it("mugs: the full Printful wrap file of the chosen size", () => {
+    expect(photoGuide(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Negro" } }))).toEqual({ width: 2700, height: 1050, dpi: null });
+    expect(photoGuide(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "15 oz", options: { color: "Negro" } }))).toEqual({ width: 2700, height: 1140, dpi: null });
   });
 
   it("wall art: the poster size at Gelato's recommended 150 dpi, following the orientation", () => {

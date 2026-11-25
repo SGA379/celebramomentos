@@ -14,7 +14,7 @@ The schema covers admin roles, catalog products and variants, postcard templates
 
 ## Admin API
 
-- `POST /api/admin/login` authenticates an owner/admin/editor and sets an httpOnly session cookie. The first login can bootstrap the owner when the submitted credentials match `ADMIN_EMAIL` and `ADMIN_PASSWORD`.
+- `POST /api/admin/login` authenticates the single active admin and sets an httpOnly session cookie. Admin credentials are created or rotated only through the controlled `ADMIN_BOOTSTRAP_CONFIRM=RESET_ADMIN npm run admin:bootstrap` command; there is no public admin registration endpoint.
 - `POST /api/admin/logout` clears the session.
 - `GET /api/admin/me` returns the current admin without the password hash.
 - `GET|POST|PATCH|DELETE /api/admin/products` provides authenticated catalog CRUD (OWNER/ADMIN can write, EDITOR can read). DELETE removes the product; past orders keep their line name/price, and carts that still reference it are rejected at checkout. Setting `active: false` hides a product without deleting it.
@@ -64,6 +64,7 @@ Environment variables (server-side only):
 | `PAYPAL_CLIENT_ID` | REST app Client ID (Sandbox or Live) |
 | `PAYPAL_CLIENT_SECRET` | REST app Secret. Never exposed to the browser |
 | `PAYPAL_MODE` | `sandbox` (default) or `live` |
+| `PAYPAL_WEBHOOK_ID` | Webhook ID from the PayPal app dashboard; required for signed asynchronous payment events |
 | `NEXT_PUBLIC_APP_URL` | Base URL that PayPal returns customers to |
 
 Flow:
@@ -74,11 +75,11 @@ Flow:
 4. If the customer cancels, PayPal redirects to `/checkout?payment=cancelled&provider=paypal&token=…`. The checkout page calls `POST /api/checkout/paypal/cancel`, which checks PayPal first: an approved or completed order is reconciled, not cancelled. Otherwise the order and payment become `CANCELLED`. The cart is kept.
 5. A declined funding source (`INSTRUMENT_DECLINED`) sends the customer back to PayPal to pick another one. Other capture rejections mark the payment `FAILED` and the order `CANCELLED`. A `PENDING` capture (PayPal review) leaves the order pending.
 
-Nothing is charged until step 3 runs on the server, so an abandoned approval leaves the order `PENDING` with no money taken. A PayPal webhook is not required for this flow. If you later accept funding sources that settle asynchronously, add a `PAYMENT.CAPTURE.COMPLETED`/`DENIED` webhook (signature checked through `/v1/notifications/verify-webhook-signature`) to update orders whose capture stays `PENDING`.
+Nothing is charged until step 3 runs on the server, so an abandoned approval leaves the order `PENDING` with no money taken. For payments that settle asynchronously or when the customer closes the return page, register PayPal's webhook at `/api/paypal/webhook`, set `PAYPAL_WEBHOOK_ID`, and subscribe to `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.PENDING`, `PAYMENT.CAPTURE.DENIED`, and `CHECKOUT.ORDER.COMPLETED`. The endpoint verifies the signed delivery through `/v1/notifications/verify-webhook-signature`, then re-reads the PayPal order before changing local payment state.
 
 Setup:
 
-1. Apply the migrations (`npm run db:deploy`). `20261026120000_paypal_payments` adds `Payment.paypalOrderId` and `Payment.paypalCaptureId`.
+1. Apply the migrations (`npm run db:deploy`). `20261026120000_paypal_payments` adds the PayPal payment IDs and `20261125120000_paypal_webhook_events` adds idempotent webhook event storage.
 2. Sandbox: create a REST app under *Sandbox* in the PayPal Developer Dashboard, set the three `PAYPAL_*` variables, and pay with a sandbox **personal** account (Dashboard → Testing tools → Sandbox accounts).
 3. Live: create a *Live* REST app, set its credentials with `PAYPAL_MODE=live`, set `NEXT_PUBLIC_APP_URL` to the production domain, and make a small real payment (refund it afterwards) before announcing PayPal. Live payments have not been tested yet.
 

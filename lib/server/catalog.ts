@@ -109,6 +109,7 @@ async function resolveCatalogSelection(selection: CatalogSelection): Promise<Cat
     image: product.images[0]?.asset.url || null,
     provider: podProviderFor(selection.productKind, variant?.provider || metadata?.provider),
     sku: variant?.podSku || null,
+    crop: selection.productKind === "MUG" ? normalizeCrop(selection.crop) : null,
     // Only what the server checked is kept; anything else the browser sent is dropped.
     printeers: printeers ? { productReference: printeers.reference, crop: normalizeCrop(selection.printeers?.crop), printMm: printeers.printMm } : null,
   };

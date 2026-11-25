@@ -12,11 +12,11 @@ describe("what the studio checks (same rules as the server)", () => {
     expect(unavailableCombination(mug({}))).toEqual({ reason: "size" });
   });
 
-  it("a mug photo is measured fitted inside the wrap file, like the server's pad check", () => {
+  it("a mug photo is measured across the complete wrap file, like the server's fill check", () => {
     const target = studioPhotoTarget(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz (325 mL)", options: { color: "Negro" } }));
-    expect(target).toEqual({ width: 2700, height: 1050, fit: "contain" });
-    expect(photoEnlargement({ width: 400, height: 300 }, target!)).toBeCloseTo(3.5, 3); // low: asks the customer to confirm
-    expect(photoEnlargement({ width: 800, height: 600 }, target!)).toBeCloseTo(1.75, 3); // soft: sent with a note
+    expect(target).toEqual({ width: 2700, height: 1050 });
+    expect(photoEnlargement({ width: 400, height: 300 }, target!)).toBeCloseTo(6.75, 3); // low: asks the customer to confirm
+    expect(photoEnlargement({ width: 800, height: 600 }, target!)).toBeCloseTo(3.375, 3); // soft: sent with a note
     expect(photoEnlargement({ width: 800, height: 600 }, { width: 2700, height: 1050 })).toBeCloseTo(3.375, 3); // cover rule (posters, magnets)
   });
 });
@@ -56,8 +56,13 @@ describe("Printful mug mapping", () => {
   });
 
   it("uses the 11 oz and 15 oz print file sizes", () => {
-    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Rojo" } })).units[0].specs[0]).toMatchObject({ fit: "pad", width: 2700, height: 1050 });
-    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "15 oz", options: { color: "Rojo" } })).units[0].specs[0]).toMatchObject({ width: 2700, height: 1140 });
+    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Rojo" } })).units[0].specs[0]).toMatchObject({ fit: "fill", width: 2700, height: 1050, repeat: true });
+    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "15 oz", options: { color: "Rojo" } })).units[0].specs[0]).toMatchObject({ fit: "fill", width: 2700, height: 1140, repeat: true });
+  });
+
+  it("carries one shared crop into the complete mug wrap file", () => {
+    const crop = { zoom: 1.8, x: 0.2, y: 0.7 };
+    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Rojo" }, crop })).units[0].specs[0]).toMatchObject({ fit: "fill", width: 2700, height: 1050, crop, repeat: true });
   });
 
   it("blocks a colour Printful does not make in that size", () => {

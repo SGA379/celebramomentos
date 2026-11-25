@@ -7,9 +7,22 @@ const env = (name: string) => {
   return value && !/replace|changeme/i.test(value) ? value : null;
 };
 
-// POD_ORDER_MODE=live sends real production orders. Anything else is "draft".
+// Production must never silently select the sandbox. If POD_ORDER_MODE is missing or
+// invalid on Vercel production, use live provider URLs but report a configuration
+// problem below so no order can be submitted until the setting is explicit.
 export function podMode(): PodMode {
-  return process.env.POD_ORDER_MODE?.trim().toLowerCase() === "live" ? "live" : "draft";
+  const configured = process.env.POD_ORDER_MODE?.trim().toLowerCase();
+  if (process.env.VERCEL_ENV === "production") return "live";
+  return configured === "live" ? "live" : "draft";
+}
+
+export function podEnvironmentProblem() {
+  const configured = process.env.POD_ORDER_MODE?.trim().toLowerCase();
+  if (process.env.VERCEL_ENV === "production") {
+    return configured === "live" ? null : "POD_ORDER_MODE=live is required in Vercel Production; print submissions are blocked until it is set explicitly";
+  }
+  if (configured && configured !== "draft" && configured !== "live") return "POD_ORDER_MODE must be draft locally or live in Vercel Production";
+  return configured === "live" ? "Local development cannot use POD_ORDER_MODE=live; use draft/test mode" : null;
 }
 
 // Paid orders are sent automatically unless POD_AUTO_SUBMIT=false (then an admin sends them).

@@ -10,6 +10,13 @@ describe("print file URLs", () => {
     expect(printFileUrl(upload, photo({}))).toBe("https://res.cloudinary.com/demo/image/upload/c_fill,g_center,w_850,h_566,q_100,f_jpg/v1793/celebramomentos/customer_upload/2026-11-01/abc.jpg");
   });
 
+  it("repeats one framed mug design on both halves of the wrap", () => {
+    const result = printFileUrl(upload, photo({ width: 2700, height: 1050, crop: { zoom: 1, x: 0.5, y: 0.5 }, repeat: true }), { width: 4000, height: 3000 });
+    expect(result).toContain("c_scale,w_1350,h_1050/c_pad,g_west,b_white,w_2700,h_1050/");
+    expect(result).toContain("l_celebramomentos:customer_upload:2026-11-01:abc,c_crop,");
+    expect(result).toContain("c_scale,w_1350,h_1050/fl_layer_apply,g_east/q_100,f_jpg/");
+  });
+
   it("pads the whole photo on white for mugs", () => {
     expect(printFileUrl(upload, photo({ fit: "pad", width: 2700, height: 1050 }))).toContain("/upload/c_pad,b_white,w_2700,h_1050,q_100,f_jpg/");
   });
