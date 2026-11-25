@@ -31,6 +31,8 @@ export type ItemContext = {
   // Phone cases: the Printeers product (phone model) the customer chose, its print area
   // and how the photo was framed, all checked against the Printeers API at checkout.
   printeers?: { productReference: string; printMm: { width: number; height: number } | null; crop: ImageCrop | null } | null;
+  // Mugs use this same crop for the complete Printful wrap canvas.
+  crop?: ImageCrop | null;
 };
 
 // One print shop line. Magnet packs become one line per photo (each magnet has its own picture).
@@ -103,7 +105,7 @@ function mapPrintful(ctx: ItemContext): ItemMapping {
   const variantId = ctx.podSku || (color ? PRINTFUL_MUG_VARIANTS[size][color] : undefined);
   if (!variantId) return { units: [], issues: [blocker("unmapped", `No Printful variant for the ${size} oz mug in colour "${optionValue(ctx.options, /^colou?r$|^cor$/i) || "?"}"`)] };
   if (!ctx.photoCount) return { units: [], issues: [blocker("missing_photos", "The order has no mug photo")] };
-  return { units: [{ productRef: String(variantId), specs: [{ area: "default", kind: "photo", photoIndex: 0, fit: "pad", ...PRINTFUL_MUG_FILE[size], format: "jpg" }] }], issues: [] };
+  return { units: [{ productRef: String(variantId), specs: [{ area: "default", kind: "photo", photoIndex: 0, fit: "fill", ...PRINTFUL_MUG_FILE[size], format: "jpg", crop: ctx.crop || null, repeat: true }] }], issues: [] };
 }
 
 // ── Gelato ───────────────────────────────────────────────────────────────────
@@ -208,12 +210,11 @@ export function mapOrderItem(ctx: ItemContext): ItemMapping {
 
 // The size (px) a customer photo is checked against in the product studio, from the same mapping the server
 // uses to make the print file: the exact file for fill products (magnets), the poster's printed size at the
-// recommended dpi. Null when there is nothing meaningful to compare (mug wraps are padded, not cropped).
+// recommended dpi. Mug wraps use their complete print canvas and follow the same crop rule as magnets.
 export function studioPhotoTarget(ctx: ItemContext): { width: number; height: number; fit?: "contain" } | null {
   const spec = mapOrderItem(ctx).units[0]?.specs.find((item) => item.kind === "photo");
   if (!spec || spec.kind !== "photo") return null;
   if (spec.fit === "fill" && spec.width && spec.height) return { width: spec.width, height: spec.height };
-  // Mugs: the photo is fitted inside the wrap file, as the server's "pad" check measures it.
   if (spec.fit === "pad" && spec.width && spec.height) return { width: spec.width, height: spec.height, fit: "contain" };
   if (spec.fit === "aspect" && spec.minDpiSize) return { width: Math.round((spec.minDpiSize.widthMm / 25.4) * POSTER_DPI), height: Math.round((spec.minDpiSize.heightMm / 25.4) * POSTER_DPI) };
   return null;

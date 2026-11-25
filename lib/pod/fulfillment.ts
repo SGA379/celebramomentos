@@ -20,7 +20,7 @@ import { STORED_STATUS, printStage } from "@/lib/order-progress";
 import { podProviderLabel } from "@/lib/products";
 import { checkPhotoResolution, checkPrintFileSize, isCloudinaryUrl, printFileUrl, type PhotoFit, type PrintSpec } from "./artwork";
 import { mapOrderItem } from "./catalog";
-import { podAutoSubmit, podMode } from "./config";
+import { podAutoSubmit, podEnvironmentProblem, podMode } from "./config";
 import { PodApiError, redact } from "./http";
 import { pdfDeliverable, renderCalendarFile, renderCompositeFile, renderPrintFile, uploadedFiles, type UploadedFile } from "./print-files";
 import { boxPixels, calendarLayout, monthName, type CalendarLanguage } from "./calendar-pdf";
@@ -92,6 +92,7 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
     cardSize: asString(personalization.cardSize),
     cardSku: asString(personalization.sku),
     printeers: printeersSelection(product.printeers),
+    crop: kind === "MUG" ? normalizeCrop(product.crop as Partial<ImageCrop>) : null,
   });
   const issues = [...mapping.issues];
   const artwork: ArtworkSlot[] = [];
@@ -302,7 +303,7 @@ export async function prepareFulfillments(orderId: string) {
   const mode = podMode();
   await Promise.all(Array.from(new Set(plans.map((plan) => plan.provider))).map(async (provider) => {
     const group = plans.filter((plan) => plan.provider === provider);
-    const problem = podAdapter(provider).configurationProblem(mode);
+    const problem = podEnvironmentProblem() ?? podAdapter(provider).configurationProblem(mode);
     let fulfillment = order.fulfillments.find((item) => item.provider === provider);
     if (!fulfillment) {
       try {
@@ -332,7 +333,7 @@ export async function refreshReadiness(fulfillmentId: string, { replan = false }
     }
   }
   const items = replan ? await prisma.orderItem.findMany({ where: { podFulfillmentId: fulfillmentId } }) : fulfillment.items;
-  const problem = podAdapter(fulfillment.provider).configurationProblem(podMode());
+  const problem = podEnvironmentProblem() ?? podAdapter(fulfillment.provider).configurationProblem(podMode());
   const issues = items.flatMap((item) => readIssues(item.podIssues));
   const held = holds(issues);
   if (fulfillment.status === "FAILED" && !held.length && !problem) return fulfillment;
@@ -438,7 +439,7 @@ export async function submitFulfillment(fulfillmentId: string, { allowWarnings =
   if (!allowed.includes(fulfillment.status)) return { ok: false, status: fulfillment.status, message: blockers.length ? blockers.map((issue) => issue.message).join(" · ") : fulfillment.lastError || `Print order is already ${fulfillment.status.toLowerCase().replace("_", " ")}` };
   const mode = podMode();
   const adapter = podAdapter(fulfillment.provider);
-  const problem = adapter.configurationProblem(mode);
+  const problem = podEnvironmentProblem() ?? adapter.configurationProblem(mode);
   if (problem) {
     await prisma.podFulfillment.update({ where: { id: fulfillmentId }, data: { status: "NEEDS_ATTENTION", lastError: problem } });
     return { ok: false, status: "NEEDS_ATTENTION", message: problem };

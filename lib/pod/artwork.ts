@@ -6,14 +6,15 @@ import type { PodIssue } from "./types";
 
 // How a customer photo is turned into the shop's print file:
 // - fill: crop to the exact size (like the storefront preview, centred)
-// - pad: fit the whole photo on a white canvas of the exact size (mug wrap)
+// - pad: fit the whole photo on a white canvas of the exact size (legacy specs)
 // - aspect: crop to the product's shape only, keeping every original pixel (the shop scales it)
 // - original: send the upload as it is (the shop positions it)
 export type PhotoFit = "fill" | "pad" | "aspect" | "original";
 
 export type PrintSpec =
   // crop: how the customer framed the photo in the editor (fit "fill" only).
-  | { area: string; kind: "photo"; photoIndex: number; fit: PhotoFit; width: number; height: number; format: "jpg" | "png"; minDpiSize?: { widthMm: number; heightMm: number }; crop?: ImageCrop | null }
+  // repeat: place the same complete framed artwork on both halves of a wrap (mugs).
+  | { area: string; kind: "photo"; photoIndex: number; fit: PhotoFit; width: number; height: number; format: "jpg" | "png"; minDpiSize?: { widthMm: number; heightMm: number }; crop?: ImageCrop | null; repeat?: boolean }
   // A strip of the customer's card pages side by side (greeting cards): the pages rendered at
   // checkout are composed in `pages` order (the product template's order, left to right) into one
   // file of exactly width × height px. Each page gets an equal slot; nothing is stretched.
@@ -38,6 +39,16 @@ export function isCloudinaryUrl(url: string) {
 export function printFileUrl(sourceUrl: string, spec: Extract<PrintSpec, { kind: "photo" }>, sourceSize?: { width: number; height: number } | null) {
   const match = sourceUrl.match(CLOUDINARY_UPLOAD);
   if (!match || spec.fit === "original") return sourceUrl;
+  if (spec.fit === "fill" && spec.repeat && spec.crop && sourceSize?.width && sourceSize.height) {
+    const id = cloudinaryPublicId(sourceUrl);
+    if (id) {
+      const halfWidth = Math.floor(spec.width / 2);
+      const rect = cropRect(sourceSize, halfWidth / spec.height, spec.crop);
+      const crop = `c_crop,x_${Math.round(rect.left)},y_${Math.round(rect.top)},w_${Math.max(1, Math.round(rect.width))},h_${Math.max(1, Math.round(rect.height))}`;
+      const layer = `l_${id.replace(/\//g, ":")},${crop},c_scale,w_${halfWidth},h_${spec.height}/fl_layer_apply,g_east`;
+      return `${match[1]}${crop}/c_scale,w_${halfWidth},h_${spec.height}/c_pad,g_west,b_white,w_${spec.width},h_${spec.height}/${layer}/q_100,f_${spec.format}/${match[2]}`;
+    }
+  }
   if (spec.fit === "fill" && spec.crop && sourceSize?.width && sourceSize.height) {
     const rect = cropRect(sourceSize, spec.width / spec.height, spec.crop);
     const crop = `c_crop,x_${Math.round(rect.left)},y_${Math.round(rect.top)},w_${Math.max(1, Math.round(rect.width))},h_${Math.max(1, Math.round(rect.height))}`;

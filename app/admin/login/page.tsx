@@ -35,7 +35,7 @@ export default function AdminLoginPage() {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Unable to sign in");
       signedIn = true;
-      router.replace(returnTo);
+      router.replace(body.requiresPasswordChange ? "/admin/account?required=password" : returnTo);
       router.refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to sign in");

@@ -118,7 +118,18 @@ export function prodigiAdapter(fetchImpl?: FetchLike): PodAdapter {
     async submit(input) {
       // outcome: Created, CreatedWithIssues (created, but Prodigi found a problem: see status.issues) or
       // AlreadyExists (the same idempotencyKey was sent before: the existing order is returned).
-      const { body } = await request<{ outcome?: string; order?: ProdigiOrder }>(input.mode, "/Orders", { method: "POST", body: JSON.stringify(buildProdigiOrder(input)) });
+      let body: { outcome?: string; order?: ProdigiOrder };
+      try {
+        body = (await request<{ outcome?: string; order?: ProdigiOrder }>(input.mode, "/Orders", { method: "POST", body: JSON.stringify(buildProdigiOrder(input)) })).body;
+      } catch (reason) {
+        // Prodigi has historically returned HTTP 500 for an account that has no
+        // billing/card details. Retrying that account configuration error six
+        // times cannot help and obscures the required manual action.
+        if (reason instanceof PodApiError && /no card details|paymentfailed/i.test(reason.message)) {
+          throw new PodApiError("PRODIGI", reason.status, reason.message, false, reason.body);
+        }
+        throw reason;
+      }
       if (!body.order?.id) throw new Error(`Prodigi did not return an order (${body.outcome || "no outcome"})`);
       return { ...parseProdigiOrder(body.order), raw: { outcome: body.outcome, id: body.order.id, status: body.order.status } };
     },

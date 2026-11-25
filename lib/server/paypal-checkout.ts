@@ -14,9 +14,13 @@ export type PayPalResult =
 const PAID_STATUSES = new Set(["PAID", "PROCESSING", "SHIPPED", "DELIVERED"]);
 
 async function findCustomerPayment(customerId: string, paypalOrderId: string) {
-  const payment = await prisma.payment.findUnique({ where: { paypalOrderId }, include: { order: { include: { items: true, discountUsages: true } } } });
+  const payment = await findPayPalPayment(paypalOrderId);
   if (!payment || payment.provider !== "paypal" || payment.order.customerId !== customerId) return null;
   return payment;
+}
+
+async function findPayPalPayment(paypalOrderId: string) {
+  return prisma.payment.findUnique({ where: { paypalOrderId }, include: { order: { include: { items: true, discountUsages: true } } } });
 }
 
 type CustomerPayment = NonNullable<Awaited<ReturnType<typeof findCustomerPayment>>>;
@@ -110,6 +114,24 @@ export async function finalizePayPalPayment(customerId: string, paypalOrderId: s
     return result(payment, "cancelled");
   }
   return result(payment, "not_approved", { approvalUrl: approvalUrl(paypalOrder) });
+}
+
+// Reconciles a signed PayPal webhook without requiring a browser session. The
+// provider order is fetched again, so a forged or stale webhook cannot mark an
+// order paid. This is also safe when the customer already completed the return
+// flow: existingStatus() prevents a second capture or cart deletion.
+export async function reconcilePayPalPayment(paypalOrderId: string): Promise<PayPalResult | null> {
+  const payment = await findPayPalPayment(paypalOrderId);
+  if (!payment || payment.provider !== "paypal") return null;
+  const known = existingStatus(payment);
+  if (known) return result(payment, known);
+  const paypalOrder = await getPayPalOrder(paypalOrderId);
+  if (paypalOrder.status === "COMPLETED") return applyPayPalOrder(payment, paypalOrder);
+  if (paypalOrder.status === "VOIDED") {
+    await markOrderFailed(payment.orderId, "CANCELLED", "PayPal order voided");
+    return result(payment, "cancelled");
+  }
+  return result(payment, "pending");
 }
 
 export async function cancelPayPalPayment(customerId: string, paypalOrderId: string): Promise<PayPalResult | null> {

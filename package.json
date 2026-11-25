@@ -15,7 +15,8 @@
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "admin:bootstrap": "node scripts/bootstrap-admin.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

@@ -640,8 +640,25 @@ function usePrinteersModel(productId: string | null, reference: string) {
 function CroppedPhoto({ src, aspect, crop, onCrop, alt, className = "", dimmed = false }: { src: string; aspect: number; crop: ImageCrop; onCrop?: (crop: ImageCrop) => void; alt: string; className?: string; dimmed?: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   const [natural, setNatural] = useState<{ src: string; width: number; height: number } | null>(null);
+  const [boxAspect, setBoxAspect] = useState<number | null>(null);
   const size = natural?.src === src ? natural : null;
-  const rect = size ? cropRect(size, aspect, crop) : null;
+  useEffect(() => {
+    if (!box.current || typeof ResizeObserver === "undefined") return;
+    const update = () => {
+      const element = box.current;
+      if (!element) return;
+      const { width, height } = element.getBoundingClientRect();
+      if (width > 0 && height > 0) setBoxAspect((current) => current && Math.abs(current - width / height) < 0.001 ? current : width / height);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(box.current);
+    return () => observer.disconnect();
+  }, []);
+  // The mug preview is a perspective view whose visible window is taller than the
+  // flat Printful half-wrap. Measure the visible box so the image stays proportional
+  // while still using the provider's aspect as the first-render fallback.
+  const rect = size ? cropRect(size, boxAspect || aspect, crop) : null;
   const drag = useRef<{ x: number; y: number; crop: ImageCrop } | null>(null);
   const move = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!drag.current || !size || !rect || !box.current || !onCrop) return;
@@ -845,11 +862,39 @@ function mugHex(name: string | null) {
   return "#f3f4f6";
 }
 
+type MugViewSide = "front" | "back";
+
+// Both angles show the same complete framed artwork. The handle changes sides,
+// while the image composition stays identical to the customer's reference.
+function MugWrapView({ side, photo, crop, onCrop, accent, windowAspect, size, label, alt }: { side: MugViewSide; photo: string | null; crop: ImageCrop; onCrop: (crop: ImageCrop) => void; accent: string; windowAspect: number; size: "11" | "15"; label: string; alt: string }) {
+  const tall = size === "15";
+  const handleClass = side === "front" ? "-left-10 rounded-l-[42px] border-r-0" : "-right-10 rounded-r-[42px] border-l-0";
+  return <div className="flex min-w-0 flex-1 flex-col items-center">
+    <div className="relative h-[285px] w-[224px] sm:h-[310px] sm:w-[242px]">
+      <div className={`absolute top-[58px] z-0 h-[148px] w-[62px] border-[15px] shadow-[0_10px_18px_rgba(64,42,38,.14)] ${tall ? "h-[166px]" : ""} ${handleClass}`} style={{ borderColor: accent }} aria-hidden="true" />
+      <div className="absolute inset-x-[3%] top-0 z-10 h-full overflow-hidden rounded-[32px_32px_25px_25px] border border-white/80 bg-gradient-to-r from-[#d8d9dc] via-white to-[#d2d3d6] shadow-[0_20px_28px_rgba(93,62,52,.22)]">
+        <div className="pointer-events-none absolute inset-x-[4%] top-[-7px] z-30 h-9 rounded-[50%] border-[7px] border-white bg-gradient-to-b from-[#777b82] via-[#eef0f2] to-[#c5c7ca] shadow-[inset_0_2px_4px_rgba(0,0,0,.3)]" />
+        <div className="absolute inset-x-[7%] top-[35px] bottom-[24px] overflow-hidden rounded-[18px] border border-white/70 bg-white shadow-[inset_10px_0_17px_rgba(0,0,0,.16),inset_-10px_0_17px_rgba(255,255,255,.72)]">
+          {photo ? <CroppedPhoto src={photo} aspect={windowAspect} crop={crop} onCrop={onCrop} alt={alt} className="absolute inset-0 h-full w-full" /> : <div className="flex h-full w-full items-center justify-center border-2 border-dashed border-[#e7cfc6] bg-[#faf8f5] text-center text-xs font-black text-[#b19a8e]">{alt}</div>}
+          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,.28),rgba(255,255,255,.08)_22%,rgba(255,255,255,.18)_50%,rgba(0,0,0,.22))] mix-blend-multiply" />
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_25%,rgba(255,255,255,.3),transparent_58%)]" />
+        </div>
+        <div className="pointer-events-none absolute inset-x-[7%] bottom-[13px] h-5 rounded-[50%] bg-gradient-to-b from-transparent via-white/70 to-white/90" />
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-white/55 to-transparent" />
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/10 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-[5%] bottom-[-5px] h-8 rounded-[50%] bg-gradient-to-t from-[#a7a9ad] via-white to-transparent opacity-80" />
+      </div>
+    </div>
+    <span className="mt-4 rounded-full bg-white/90 px-5 py-2 text-xs font-black text-[#182443] shadow-md">{label}</span>
+  </div>;
+}
+
 export function MugStudio() {
   const es = useSelector((state: RootState) => state.language.language) === "es";
   const studio = useStudioCatalog("MUG");
   const cart = useStudioCart("MUG");
   const [photo, setPhoto] = useState<string | null>(null);
+  const [crop, setCrop] = useState<ImageCrop>(DEFAULT_CROP);
   const [color, setColor] = useState<MugColor>("black");
   const sizeName = studio.variant?.name || "";
   const size = /15/.test(sizeName) ? "15" : "11";
@@ -857,6 +902,7 @@ export function MugStudio() {
   const adminColors = studio.hasOption(COLOR_OPTION);
   useCatalogEdit(cart.editing, studio, useCallback((selection: CatalogSelection) => {
     setPhoto(selection.photos[0] || null);
+    setCrop(selection.crop ? normalizeCrop(selection.crop) : DEFAULT_CROP);
     const saved = (Object.keys(MUG_COLORS) as MugColor[]).find((key) => MUG_COLORS[key].es === selection.options.color);
     if (saved) setColor(saved);
   }, []));
@@ -864,6 +910,12 @@ export function MugStudio() {
   useEffect(() => { if (!available.includes(color)) setColor(available[0]); }, [available, color]);
   const colorName = adminColors ? studio.optionValue(COLOR_OPTION) : MUG_COLORS[color][es ? "es" : "pt"];
   const accent = adminColors ? mugHex(studio.optionValue(COLOR_OPTION)) : MUG_COLORS[color].hex;
+  const printFile = studio.printFile ?? studio.guide("photo", { color: colorName || "" });
+  const wrapWidth = printFile?.width || 2700;
+  const wrapHeight = printFile?.height || (size === "15" ? 1140 : 1050);
+  const wrapAspect = wrapWidth / wrapHeight;
+  const windowAspect = wrapAspect / 2;
+  const changePhoto = (value: string) => { setPhoto(value); setCrop(DEFAULT_CROP); };
   const controls = (
     <div className="mt-6 space-y-6">
       {!adminColors && <fieldset>
@@ -874,40 +926,20 @@ export function MugStudio() {
       </fieldset>}
       <div>
         <p className="text-sm font-black">{es ? "Tu fotografía" : "A tua fotografia"}</p>
-        <UploadButton photo={photo} onPhoto={setPhoto} es={es} />
-        <PrintFileNote printFile={studio.printFile ?? studio.guide("photo", { color: colorName || "" })} photo={photo} es={es} />
+        <UploadButton photo={photo} onPhoto={changePhoto} es={es} />
+        {photo && <div className="mt-4 rounded-2xl border border-[#eadfd8] bg-white p-3.5"><div className="flex items-center justify-between gap-3"><label htmlFor="mug-zoom" className="text-[11px] font-black text-[#59627b]">{es ? "Tamaño de la foto" : "Tamanho da fotografia"}</label><span className="text-[11px] font-black text-[#182443]">{Math.round(crop.zoom * 100)}%</span></div><input id="mug-zoom" type="range" min={CROP_LIMITS.minZoom} max={CROP_LIMITS.maxZoom} step="0.05" value={crop.zoom} onChange={(event) => setCrop(normalizeCrop({ ...crop, zoom: Number(event.target.value) }))} className="mt-2 w-full accent-[#ee5264]" /><p className="mt-2 text-[11px] leading-5 text-[#737b90]">{es ? "Arrastra la foto en cualquiera de las dos tazas para cambiar su posición." : "Arrasta a fotografia em qualquer uma das duas canecas para mudar a posição."}</p></div>}
+        <PrintFileNote printFile={printFile} photo={photo} es={es} />
       </div>
     </div>
   );
   const preview = (
-    <div className="flex min-h-[500px] flex-col items-center justify-center rounded-[22px] bg-gradient-to-b from-[#fbf5f0] to-[#f4ebe3] p-6 sm:p-10">
-      <div className="relative mx-auto flex w-full max-w-[340px] flex-col items-center">
-        <div className="relative flex items-center justify-center">
-          <div className={`relative ${size === "15" ? "h-[320px] w-[230px]" : "h-[290px] w-[215px]"} overflow-hidden rounded-[28px] border-4 border-white bg-white shadow-2xl shadow-[#8a564c]/30`}>
-            {/* Coloured inside, visible at the rim */}
-            <div className="h-7 w-full border-b border-black/10 transition-colors" style={{ backgroundColor: accent }} />
-            <div className="relative h-[calc(100%-28px)] w-full overflow-hidden bg-white p-3">
-              {/* Only the customer's photo is printed here; product mockups are photos of whole mugs. */}
-              <div className="h-full w-full overflow-hidden rounded-xl border border-gray-100 bg-[#f9f5f1]">
-                {photo
-                  // eslint-disable-next-line @next/next/no-img-element
-                  ? <img src={photo} alt={es ? "Fotografía en la taza" : "Fotografia na caneca"} className="h-full w-full object-cover" />
-                  : <div className="flex h-full w-full flex-col items-center justify-center gap-2 border-2 border-dashed border-[#e7cfc6] text-center text-[#b19a8e]"><Icon name="plus" size={22} /><span className="px-4 text-xs font-black">{es ? "Tu foto aquí" : "A tua foto aqui"}</span></div>}
-              </div>
-              <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/10 via-transparent to-white/40" />
-              <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-black/15 to-transparent" />
-              <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/15 to-transparent" />
-            </div>
-          </div>
-          {/* Coloured handle */}
-          <div className={`absolute -right-10 top-16 ${size === "15" ? "h-44 w-14" : "h-36 w-12"} rounded-r-[32px] border-[14px] border-l-0 transition-colors`} style={{ borderColor: accent, boxShadow: "4px 8px 18px rgba(0,0,0,0.12)" }} />
-        </div>
-        <div className="mt-6 flex items-center gap-2 rounded-full bg-white/90 px-4 py-1.5 text-xs font-black text-[#182443] shadow-md backdrop-blur">
-          <span>{[sizeName, colorName].filter(Boolean).join(" · ")}</span>
-        </div>
+    <div className="flex min-h-[500px] flex-col items-center justify-center rounded-[22px] bg-gradient-to-b from-[#fbf5f0] to-[#f4ebe3] p-5 sm:p-8">
+      <div className="grid w-full max-w-[760px] grid-cols-1 gap-8 sm:grid-cols-2 sm:gap-5">
+        <MugWrapView side="front" photo={photo} crop={crop} onCrop={setCrop} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista frontal" : "Vista frontal"} alt={es ? "Tu foto aparecerá aquí" : "A tua fotografia aparecerá aqui"} />
+        <MugWrapView side="back" photo={photo} crop={crop} onCrop={setCrop} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista trasera" : "Vista traseira"} alt={es ? "Tu foto aparecerá aquí" : "A tua fotografia aparecerá aqui"} />
       </div>
-      <p className="mt-5 text-center text-xs font-bold text-[#737b90]">{es ? "Taza de cerámica · Apta para lavavajillas y microondas" : "Caneca de cerâmica · Apta para máquina e micro-ondas"}</p>
+      <p className="mt-7 text-center text-xs font-bold text-[#737b90]">{es ? "Taza de cerámica · La misma fotografía aparece completa en la vista frontal y trasera" : "Caneca de cerâmica · A mesma fotografia aparece completa na vista frontal e traseira"}</p>
     </div>
   );
-  return <StudioShell eyebrow={es ? "TAZAS PERSONALIZADAS" : "CANECAS PERSONALIZADAS"} title={es ? "Empieza cada mañana con tus mejores recuerdos" : "Começa cada manhã com as tuas melhores memórias"} body={es ? "Taza de cerámica con asa e interior de color. Elige el tamaño y el color, y añade tu foto favorita." : "Caneca de cerâmica com asa e interior de cor. Escolhe o tamanho e a cor, e adiciona a tua foto favorita."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más tazas" : "Mais canecas"} action={catalogAction(studio, cart, es, [photo], adminColors ? {} : { color: MUG_COLORS[color].es }, "/mugs")} />;
+  return <StudioShell eyebrow={es ? "TAZAS PERSONALIZADAS" : "CANECAS PERSONALIZADAS"} title={es ? "Empieza cada mañana con tus mejores recuerdos" : "Começa cada manhã com as tuas melhores memórias"} body={es ? "Taza de cerámica con asa e interior de color. Elige el tamaño y el color, y añade tu foto favorita." : "Caneca de cerâmica com asa e interior de cor. Escolhe o tamanho e a cor, e adiciona a tua foto favorita."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más tazas" : "Mais canecas"} action={catalogAction(studio, cart, es, [photo], adminColors ? {} : { color: MUG_COLORS[color].es }, "/mugs", { printFile, zoom: crop.zoom, selection: { crop } })} />;
 }

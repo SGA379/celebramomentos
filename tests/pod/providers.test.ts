@@ -71,6 +71,11 @@ describe("Prodigi", () => {
     expect(state).toMatchObject({ providerOrderId: "ord_1", status: "SUBMITTED" });
   });
 
+  it("does not endlessly retry a provider-account billing setup failure", async () => {
+    const { impl } = fakeFetch([{ status: 500, body: { outcome: "PaymentFailed", message: "No card details" } }]);
+    await expect(prodigiAdapter(impl).submit(input("live"))).rejects.toMatchObject({ retryable: false, message: expect.stringContaining("No card details") });
+  });
+
   it("reads production and tracking from the order", () => {
     expect(parseProdigiOrder({ id: "o", status: { stage: "InProgress", details: { inProduction: "InProgress" } } }).status).toBe("IN_PRODUCTION");
     expect(parseProdigiOrder({ id: "o", status: { stage: "Complete" }, shipments: [{ status: "Shipped", carrier: { name: "royalmail", service: "Tracked" }, tracking: { number: "RM1", url: "https://track/RM1" } }] })).toMatchObject({ status: "SHIPPED", trackingNumber: "RM1", trackingUrl: "https://track/RM1", carrier: "royalmail · Tracked" });

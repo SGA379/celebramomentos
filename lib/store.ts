@@ -69,6 +69,8 @@ export type CatalogSelection = {
   // Picture of the finished design as the studio showed it (mug, case, magnets…), captured when it was
   // added to the cart. Display only: print files always come from `photos`.
   preview?: string | null;
+  // Mugs use one crop across the complete Printful wrap canvas; both preview angles share it.
+  crop?: ImageCrop | null;
   priceCents: number;
   // Set by the server for fulfilment: the print shop and its SKU for the chosen size.
   provider?: string | null;

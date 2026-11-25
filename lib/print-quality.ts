@@ -25,8 +25,7 @@ export function photoQuality(enlargement: number): PhotoQuality {
 // How much the photo is enlarged when the print is cut from it, as the server makes the print file: the
 // photo is never rotated, so a landscape photo on a portrait print only uses its middle strip. `zoom` (the
 // customer's crop zoom) uses even fewer of the photo's pixels.
-// fit "contain": the whole photo is fitted inside the print file on a white canvas (mug wrap), so only the
-// side that reaches the file's edge counts — the same rule as the server's "pad" print files.
+// fit "contain": the whole photo is fitted inside the print file on a white canvas for legacy padded files.
 export function photoEnlargement(photo: { width: number; height: number }, print: { width: number; height: number; fit?: "cover" | "contain" }, zoom = 1) {
   if (!photo.width || !photo.height || !print.width || !print.height) return 0;
   const scale = print.fit === "contain" ? Math.min(print.width / photo.width, print.height / photo.height) : Math.max(print.width / photo.width, print.height / photo.height);

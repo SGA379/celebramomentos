@@ -17,11 +17,17 @@ function config() {
   const mode = (process.env.PAYPAL_MODE || "sandbox").trim().toLowerCase();
   if (!clientId || !clientSecret || clientId.includes("replace") || clientSecret.includes("replace")) throw new Error("PayPal is not configured");
   if (mode !== "sandbox" && mode !== "live") throw new Error("PAYPAL_MODE must be sandbox or live");
+  if (process.env.VERCEL_ENV === "production" && mode !== "live") throw new Error("PAYPAL_MODE=live is required in Vercel Production");
+  if (process.env.VERCEL_ENV !== "production" && mode === "live") throw new Error("Local development cannot use PAYPAL_MODE=live");
   return { clientId, clientSecret, baseUrl: PAYPAL_HOSTS[mode] };
 }
 
 export function assertPayPalConfigured() {
   config();
+}
+
+export function paypalWebhookConfigured() {
+  return Boolean(process.env.PAYPAL_WEBHOOK_ID?.trim() && process.env.PAYPAL_WEBHOOK_ID.trim().length >= 10);
 }
 
 let cachedToken: { value: string; expiresAt: number; key: string } | null = null;
@@ -62,6 +68,35 @@ async function paypalRequest<T>(path: string, init: { method: "GET" | "POST"; bo
     throw new PayPalError(body.details?.[0]?.description || body.message || `PayPal request failed (${response.status})`, response.status, issue, body.debug_id);
   }
   return body as T;
+}
+
+// PayPal signs webhook deliveries with transmission headers and asks the
+// merchant server to verify them. The event body is sent unchanged as the
+// webhook_event object; no payment state is trusted until PayPal is queried
+// again by reconcilePayPalPayment().
+export async function verifyPayPalWebhook(input: {
+  transmissionId: string | null;
+  transmissionTime: string | null;
+  certUrl: string | null;
+  authAlgo: string | null;
+  transmissionSig: string | null;
+  webhookEvent: unknown;
+}) {
+  const webhookId = process.env.PAYPAL_WEBHOOK_ID?.trim();
+  if (!webhookId || webhookId.length < 10) return false;
+  const result = await paypalRequest<{ verification_status?: string }>("/v1/notifications/verify-webhook-signature", {
+    method: "POST",
+    body: {
+      auth_algo: input.authAlgo,
+      cert_url: input.certUrl,
+      transmission_id: input.transmissionId,
+      transmission_sig: input.transmissionSig,
+      transmission_time: input.transmissionTime,
+      webhook_id: webhookId,
+      webhook_event: input.webhookEvent,
+    },
+  });
+  return result.verification_status === "SUCCESS";
 }
 
 export type PayPalOrder = {

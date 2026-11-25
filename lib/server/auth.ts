@@ -22,8 +22,8 @@ export async function verifyPassword(password: string, hash: string) {
   return bcrypt.compare(password, hash);
 }
 
-export async function createAdminSession(adminId: string) {
-  return new SignJWT({ typ: "admin" })
+export async function createAdminSession(adminId: string, authVersion: number) {
+  return new SignJWT({ typ: "admin", ver: authVersion })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(adminId)
     .setIssuedAt()
@@ -37,9 +37,11 @@ export async function getAdminSession() {
   try {
     const { payload } = await jwtVerify(token, secret());
     if (!payload.sub) return null;
-    if (payload.typ !== "admin") return null;
-    const admin = await prisma.adminUser.findFirst({ where: { id: payload.sub, active: true }, select: { id: true, email: true, name: true } });
-    return admin;
+    if (payload.typ !== "admin" || typeof payload.ver !== "number") return null;
+    const admin = await prisma.adminUser.findFirst({ where: { id: payload.sub, active: true }, select: { id: true, email: true, name: true, authVersion: true, mustChangePassword: true, createdAt: true, updatedAt: true } });
+    if (!admin || admin.authVersion !== payload.ver) return null;
+    const { authVersion: _authVersion, ...profile } = admin;
+    return profile;
   } catch {
     return null;
   }
