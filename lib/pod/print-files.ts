@@ -11,9 +11,11 @@ export type UploadedFile = { width: number; height: number; mimeType: string; ki
 
 // Renders one print file from the customer's photo (crop / fit with Cloudinary) and
 // saves it under a fixed name per order item, unit and area, so a re-check replaces it.
-export async function renderPrintFile(input: { orderId: string; itemId: string; unit: number; area: string; sourceUrl: string; sourceSize?: { width: number; height: number } | null; spec: Extract<PrintSpec, { kind: "photo" }> }): Promise<StoredFile> {
+export async function renderPrintFile(input: { orderId: string; itemId: string; unit: number; area: string; sourceUrl: string; sourceUrl2?: string; sourceSize?: { width: number; height: number } | null; sourceSize2?: { width: number; height: number } | null; composedUrl?: string | null; spec: Extract<PrintSpec, { kind: "photo" | "mug" }> }): Promise<StoredFile> {
   const name = `${input.itemId}-${input.unit + 1}-${input.area}`;
-  const uploaded = await uploadRemoteImageToCloudinary({ url: printFileUrl(input.sourceUrl, input.spec, input.sourceSize), folder: `celebramomentos/print_file/${input.orderId}`, publicId: name });
+  const source = input.composedUrl || (input.spec.kind === "photo" ? printFileUrl(input.sourceUrl, input.spec, input.sourceSize) : null);
+  if (!source) throw new Error("A mug print file could not be composed");
+  const uploaded = await uploadRemoteImageToCloudinary({ url: source, folder: `celebramomentos/print_file/${input.orderId}`, publicId: name });
   if (!uploaded.width || !uploaded.height) throw new Error("Cloudinary did not report the file's pixel size");
   const objectKey = cloudinaryObjectKey(uploaded.publicId);
   const data = {

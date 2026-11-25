@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { CARD_SIZES, SHARE_DISCOUNT_CODE, templates } from "@/lib/data";
-import { normalizeCrop } from "@/lib/crop";
+import { normalizeCrop, normalizeMugCrops } from "@/lib/crop";
 import { PodApiError } from "@/lib/pod/http";
 import { unavailableCombination } from "@/lib/pod/catalog";
 import { linkedProductgroup, phoneModel, printeersCatalogReady } from "@/lib/pod/printeers/catalog";
@@ -110,6 +110,7 @@ async function resolveCatalogSelection(selection: CatalogSelection): Promise<Cat
     provider: podProviderFor(selection.productKind, variant?.provider || metadata?.provider),
     sku: variant?.podSku || null,
     crop: selection.productKind === "MUG" ? normalizeCrop(selection.crop) : null,
+    mugCrops: selection.productKind === "MUG" && selection.mugCrops ? normalizeMugCrops(selection.mugCrops, selection.crop) : null,
     // Only what the server checked is kept; anything else the browser sent is dropped.
     printeers: printeers ? { productReference: printeers.reference, crop: normalizeCrop(selection.printeers?.crop), printMm: printeers.printMm } : null,
   };

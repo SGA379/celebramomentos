@@ -2,7 +2,7 @@
 
 import { configureStore, createSlice, PayloadAction } from "@reduxjs/toolkit";
 import { CARD_SIZE_IDS, DEFAULT_CARD_SIZE, DELIVERY_METHOD, resolveFrameId, type CardSize, type DeliveryMethod, type DesignCategoryId, type RecipientMode } from "./data";
-import type { ImageCrop } from "./crop";
+import type { ImageCrop, MugCrops } from "./crop";
 import type { StudioProductKind } from "./products";
 import { defaultEmojiPosition, type EmojiElement, type EmojiPosition, type EmojiTone } from "./emojis";
 
@@ -71,6 +71,8 @@ export type CatalogSelection = {
   preview?: string | null;
   // Mugs use one crop across the complete Printful wrap canvas; both preview angles share it.
   crop?: ImageCrop | null;
+  // New mug customizations keep independent framing for the front and back images.
+  mugCrops?: MugCrops | null;
   priceCents: number;
   // Set by the server for fulfilment: the print shop and its SKU for the chosen size.
   provider?: string | null;

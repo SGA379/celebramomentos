@@ -5,6 +5,7 @@
 // higher zoom = a smaller crop. x / y say where that crop sits in the room left over:
 // 0 = left / top edge, 0.5 = centred, 1 = right / bottom edge.
 export type ImageCrop = { zoom: number; x: number; y: number };
+export type MugCrops = { front: ImageCrop; back: ImageCrop };
 export const DEFAULT_CROP: ImageCrop = { zoom: 1, x: 0.5, y: 0.5 };
 export const CROP_LIMITS = { minZoom: 1, maxZoom: 4 } as const;
 
@@ -13,6 +14,10 @@ const unit = (value: number) => (Number.isFinite(value) ? Math.min(1, Math.max(0
 export function normalizeCrop(crop: Partial<ImageCrop> | null | undefined): ImageCrop {
   const zoom = Number(crop?.zoom);
   return { zoom: Number.isFinite(zoom) ? Math.min(CROP_LIMITS.maxZoom, Math.max(CROP_LIMITS.minZoom, zoom)) : 1, x: unit(Number(crop?.x ?? 0.5)), y: unit(Number(crop?.y ?? 0.5)) };
+}
+
+export function normalizeMugCrops(crops: Partial<{ front: Partial<ImageCrop> | null; back: Partial<ImageCrop> | null }> | null | undefined, fallback?: Partial<ImageCrop> | null): MugCrops {
+  return { front: normalizeCrop(crops?.front ?? fallback), back: normalizeCrop(crops?.back ?? fallback) };
 }
 
 // The part of the photo (in its own pixels) that fills an area of shape `aspect` (width / height).

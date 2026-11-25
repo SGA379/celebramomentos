@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkPhotoResolution, checkPrintFileSize, gelatoFormatMm, printFileUrl, type PrintSpec } from "@/lib/pod/artwork";
+import { checkPhotoResolution, checkPrintFileSize, gelatoFormatMm, mugFileUrl, printFileUrl, type PrintSpec } from "@/lib/pod/artwork";
 import { CARD_SIZES } from "@/lib/data";
 
 const upload = "https://res.cloudinary.com/demo/image/upload/v1793/celebramomentos/customer_upload/2026-11-01/abc.jpg";
@@ -15,6 +15,15 @@ describe("print file URLs", () => {
     expect(result).toContain("c_scale,w_1350,h_1050/c_pad,g_west,b_white,w_2700,h_1050/");
     expect(result).toContain("l_celebramomentos:customer_upload:2026-11-01:abc,c_crop,");
     expect(result).toContain("c_scale,w_1350,h_1050/fl_layer_apply,g_east/q_100,f_jpg/");
+  });
+
+  it("composes different front and back mug uploads into the same wrap", () => {
+    const back = "https://res.cloudinary.com/demo/image/upload/v1793/celebramomentos/customer_upload/2026-11-01/back.jpg";
+    const spec = { area: "default", kind: "mug" as const, photoIndex: 0, backPhotoIndex: 1, width: 2700, height: 1050, format: "jpg" as const, crop: { zoom: 1, x: 0.5, y: 0.5 }, backCrop: { zoom: 1.5, x: 0.8, y: 0.2 } };
+    const result = mugFileUrl(upload, back, spec, { width: 2400, height: 1800 }, { width: 1800, height: 2400 });
+    expect(result).toContain("c_scale,w_1350,h_1050/c_pad,g_west,b_white,w_2700,h_1050/");
+    expect(result).toContain("l_celebramomentos:customer_upload:2026-11-01:back,c_crop,");
+    expect(result).toContain("fl_layer_apply,g_east/q_100,f_jpg/");
   });
 
   it("pads the whole photo on white for mugs", () => {
