@@ -1,14 +1,13 @@
 // The print file of a wall calendar (Gelato): ONE PDF of 14 pages in reading order — cover, January …
-// December, back — each page at the calendar's exact trim size (e.g. A4 210 × 297 mm; Gelato prints them
-// on 7 sheets, both sides, wire-bound at the top). Pure: the caller fetches the photos (already cut to the
-// photo boxes' shape) and stores the result.
+// December, back — with the trim layout kept inside a 4 mm bleed on every side. The caller fetches the
+// photos (already cut to the photo boxes' shape) and stores the result.
 //
 // The month pages repeat what the customer saw in the studio (components/product-studio.tsx,
 // CalendarStudio): the month's photo on top, the month name and year under it, then a Monday-first grid.
 // Nothing important sits near the edges (white margins, a deeper one at the top for the wire binding), so
 // the page prints correctly whether the shop trims or scales for bleed. A month without a photo gets a soft
 // panel with its name instead of an empty hole.
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import { calendarLayout, type Box } from "./calendar-layout";
 
 // The layout is shared with the product studio (image size recommendations), which cannot load pdf-lib.
@@ -17,6 +16,12 @@ export { boxPixels, calendarLayout, type Box } from "./calendar-layout";
 export type CalendarLanguage = "es" | "pt";
 
 export const CALENDAR_PAGES = 14;
+export const CALENDAR_BLEED_MM = 4;
+export const CALENDAR_MAX_BYTES = 10_485_760;
+
+export function calendarPdfPage(page: { width: number; height: number }) {
+  return { width: page.width + CALENDAR_BLEED_MM * 2, height: page.height + CALENDAR_BLEED_MM * 2 };
+}
 
 const MONTHS: Record<CalendarLanguage, string[]> = {
   es: ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"],
@@ -43,7 +48,7 @@ const MUTED = rgb(146 / 255, 151 / 255, 164 / 255);
 type Fonts = { serif: PDFFont; sans: PDFFont; sansBold: PDFFont };
 
 export type CalendarInput = {
-  page: { width: number; height: number }; // mm
+  page: { width: number; height: number }; // trim/content size in mm
   year: number;
   language: CalendarLanguage;
   // 12 JPEGs (January first) cut to layout.month's shape, or null for a month without a photo.
@@ -54,31 +59,55 @@ export type CalendarInput = {
 
 export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array> {
   if (input.monthPhotos.length !== 12) throw new Error("A calendar needs 12 month slots");
+  if (!(input.page.width > 0) || !(input.page.height > 0)) throw new Error("A calendar page needs positive dimensions");
   const layout = calendarLayout(input.page);
   const pdf = await PDFDocument.create();
   pdf.setTitle(`${TITLE[input.language]} ${input.year}`);
   pdf.setCreator("Celebra Momentos");
   const fonts: Fonts = { serif: await pdf.embedFont(StandardFonts.TimesRomanBold), sans: await pdf.embedFont(StandardFonts.Helvetica), sansBold: await pdf.embedFont(StandardFonts.HelveticaBold) };
-  const size: [number, number] = [input.page.width * PT, input.page.height * PT];
+  const outputPage = calendarPdfPage(input.page);
+  const size: [number, number] = [outputPage.width * PT, outputPage.height * PT];
+  const embeddedImages = new Map<string, PDFImage>();
+
+  const imageKey = (bytes: Uint8Array) => {
+    // Two small independent hashes avoid embedding the same optimized upload repeatedly while keeping
+    // this shared module browser-safe (the product studio imports its layout helpers).
+    let first = 2_166_136_261;
+    let second = 2_654_435_761;
+    for (const byte of bytes) {
+      first = Math.imul(first ^ byte, 16_777_619);
+      second = Math.imul(second ^ (byte + 31), 2_246_822_519);
+    }
+    return `${bytes.length}:${first >>> 0}:${second >>> 0}`;
+  };
+
+  const imageFor = async (bytes: Uint8Array) => {
+    const key = imageKey(bytes);
+    const existing = embeddedImages.get(key);
+    if (existing) return existing;
+    const image = await pdf.embedJpg(bytes);
+    embeddedImages.set(key, image);
+    return image;
+  };
 
   // y in mm from the top → PDF points from the bottom.
   const at = (page: PDFPage) => ({
-    rect: (box: Box, color = PANEL) => page.drawRectangle({ x: box.x * PT, y: (input.page.height - box.y - box.height) * PT, width: box.width * PT, height: box.height * PT, color }),
-    line: (x1: number, y1: number, x2: number, y2: number, thickness = 0.5, color = LINE) => page.drawLine({ start: { x: x1 * PT, y: (input.page.height - y1) * PT }, end: { x: x2 * PT, y: (input.page.height - y2) * PT }, thickness, color }),
+    rect: (box: Box, color = PANEL) => page.drawRectangle({ x: (CALENDAR_BLEED_MM + box.x) * PT, y: (outputPage.height - CALENDAR_BLEED_MM - box.y - box.height) * PT, width: box.width * PT, height: box.height * PT, color }),
+    line: (x1: number, y1: number, x2: number, y2: number, thickness = 0.5, color = LINE) => page.drawLine({ start: { x: (CALENDAR_BLEED_MM + x1) * PT, y: (outputPage.height - CALENDAR_BLEED_MM - y1) * PT }, end: { x: (CALENDAR_BLEED_MM + x2) * PT, y: (outputPage.height - CALENDAR_BLEED_MM - y2) * PT }, thickness, color }),
     // Text whose baseline is at `y` mm; align left / center / right of x.
     text: (value: string, x: number, y: number, font: PDFFont, sizeMm: number, color = NAVY, align: "left" | "center" | "right" = "left") => {
       const points = sizeMm * PT;
       const textWidth = font.widthOfTextAtSize(value, points) / PT;
       const left = align === "left" ? x : align === "center" ? x - textWidth / 2 : x - textWidth;
-      page.drawText(value, { x: left * PT, y: (input.page.height - y) * PT, size: points, font, color });
+      page.drawText(value, { x: (CALENDAR_BLEED_MM + left) * PT, y: (outputPage.height - CALENDAR_BLEED_MM - y) * PT, size: points, font, color });
     },
   });
 
   const photo = async (page: PDFPage, box: Box, bytes: Uint8Array | null, label: string) => {
     const draw = at(page);
     if (bytes) {
-      const image = await pdf.embedJpg(bytes);
-      page.drawImage(image, { x: box.x * PT, y: (input.page.height - box.y - box.height) * PT, width: box.width * PT, height: box.height * PT });
+      const image = await imageFor(bytes);
+      page.drawImage(image, { x: (CALENDAR_BLEED_MM + box.x) * PT, y: (outputPage.height - CALENDAR_BLEED_MM - box.y - box.height) * PT, width: box.width * PT, height: box.height * PT });
       return;
     }
     draw.rect(box);
@@ -87,6 +116,7 @@ export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array
 
   // ── Cover ──
   const cover = pdf.addPage(size);
+  cover.drawRectangle({ x: 0, y: 0, width: size[0], height: size[1], color: rgb(1, 1, 1) });
   // The caller cuts the customer's first photo to the cover's shape; without any photo the panel shows the year.
   await photo(cover, layout.cover, input.coverPhoto, String(input.year));
   const coverText = at(cover);
@@ -98,6 +128,7 @@ export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array
   // ── Months ──
   for (let month = 0; month < 12; month += 1) {
     const page = pdf.addPage(size);
+    page.drawRectangle({ x: 0, y: 0, width: size[0], height: size[1], color: rgb(1, 1, 1) });
     const draw = at(page);
     const name = MONTHS[input.language][month];
     await photo(page, layout.month, input.monthPhotos[month], name);
@@ -133,7 +164,24 @@ export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array
 
   // ── Back ──
   const back = pdf.addPage(size);
+  back.drawRectangle({ x: 0, y: 0, width: size[0], height: size[1], color: rgb(1, 1, 1) });
   at(back).text("celebra-momentos.com", input.page.width / 2, input.page.height - layout.margin - 4, fonts.sans, Math.min(3.2, input.page.width * 0.016), MUTED, "center");
 
-  return pdf.save();
+  return pdf.save({ useObjectStreams: true });
+}
+
+export async function validateCalendarPdf(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES) {
+  const pdf = await PDFDocument.load(bytes);
+  const expected = calendarPdfPage(trimPage);
+  const pages = pdf.getPages();
+  if (pages.length !== CALENDAR_PAGES) throw new Error(`Calendar PDF has ${pages.length} pages; Gelato requires ${CALENDAR_PAGES}`);
+  for (const [index, page] of pages.entries()) {
+    const widthMm = (page.getWidth() / PT);
+    const heightMm = (page.getHeight() / PT);
+    if (Math.abs(widthMm - expected.width) > 0.01 || Math.abs(heightMm - expected.height) > 0.01) {
+      throw new Error(`Calendar PDF page ${index + 1} is ${widthMm.toFixed(2)} × ${heightMm.toFixed(2)} mm; expected ${expected.width} × ${expected.height} mm including ${CALENDAR_BLEED_MM} mm bleed`);
+    }
+  }
+  if (bytes.byteLength > maxBytes) throw new Error(`Calendar PDF is ${bytes.byteLength} bytes; Gelato allows at most ${maxBytes} bytes`);
+  return { pages: pages.length, bytes: bytes.byteLength, pageMm: expected, bleedMm: CALENDAR_BLEED_MM };
 }

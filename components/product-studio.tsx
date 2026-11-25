@@ -12,7 +12,7 @@ import { getSessionUser } from "@/lib/client-session";
 import { captureStudioPreview } from "@/lib/capture-preview";
 import { savePendingCartItem } from "@/lib/pending-cart";
 import { trackPixel } from "@/lib/meta-pixel";
-import { CROP_LIMITS, DEFAULT_CROP, cropRect, mmToPx, normalizeCrop, type ImageCrop } from "@/lib/crop";
+import { CROP_LIMITS, DEFAULT_CROP, cropRect, mmToPx, normalizeCrop, normalizeMugCrops, type ImageCrop, type MugCrops } from "@/lib/crop";
 import { studioPhotoTarget, unavailableCombination } from "@/lib/pod/catalog";
 import { minimumPhotoSize, photoEnlargement, photoQuality, type PhotoQuality } from "@/lib/print-quality";
 import { CALENDAR_COVER_INDEX, CALENDAR_PHOTOS, MAX_PRODUCT_PHOTOS, MAX_SELECTION_PHOTOS, podProviderFor, productPrintFile, requiredPhotoCount, type CatalogProduct, type PrintFile, type StudioProductKind } from "@/lib/products";
@@ -893,16 +893,16 @@ export function MugStudio() {
   const es = useSelector((state: RootState) => state.language.language) === "es";
   const studio = useStudioCatalog("MUG");
   const cart = useStudioCart("MUG");
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [crop, setCrop] = useState<ImageCrop>(DEFAULT_CROP);
+  const [photos, setPhotos] = useState<[string | null, string | null]>([null, null]);
+  const [mugCrops, setMugCrops] = useState<MugCrops>({ front: DEFAULT_CROP, back: DEFAULT_CROP });
   const [color, setColor] = useState<MugColor>("black");
   const sizeName = studio.variant?.name || "";
   const size = /15/.test(sizeName) ? "15" : "11";
   const available = /15/.test(sizeName) ? MUG_COLORS_BY_SIZE["15"] : /11/.test(sizeName) ? MUG_COLORS_BY_SIZE["11"] : (Object.keys(MUG_COLORS) as MugColor[]);
   const adminColors = studio.hasOption(COLOR_OPTION);
   useCatalogEdit(cart.editing, studio, useCallback((selection: CatalogSelection) => {
-    setPhoto(selection.photos[0] || null);
-    setCrop(selection.crop ? normalizeCrop(selection.crop) : DEFAULT_CROP);
+    setPhotos([selection.photos[0] || null, selection.photos[1] || null]);
+    setMugCrops(selection.mugCrops ? normalizeMugCrops(selection.mugCrops, selection.crop) : normalizeMugCrops(null, selection.crop));
     const saved = (Object.keys(MUG_COLORS) as MugColor[]).find((key) => MUG_COLORS[key].es === selection.options.color);
     if (saved) setColor(saved);
   }, []));
@@ -915,7 +915,10 @@ export function MugStudio() {
   const wrapHeight = printFile?.height || (size === "15" ? 1140 : 1050);
   const wrapAspect = wrapWidth / wrapHeight;
   const windowAspect = wrapAspect / 2;
-  const changePhoto = (value: string) => { setPhoto(value); setCrop(DEFAULT_CROP); };
+  const facePrintFile = { width: Math.floor(wrapWidth / 2), height: wrapHeight };
+  const changePhoto = (side: 0 | 1, value: string) => { setPhotos((current) => { const next: [string | null, string | null] = [...current]; next[side] = value; return next; }); setMugCrops((current) => ({ ...current, [side === 0 ? "front" : "back"]: DEFAULT_CROP })); };
+  const changeCrop = (side: "front" | "back", value: ImageCrop) => setMugCrops((current) => ({ ...current, [side]: value }));
+  const backHint = photos[0] && !photos[1] ? (es ? "Sube una imagen diferente para la parte trasera." : "Carrega uma imagem diferente para a parte traseira.") : undefined;
   const controls = (
     <div className="mt-6 space-y-6">
       {!adminColors && <fieldset>
@@ -925,21 +928,23 @@ export function MugStudio() {
         </div>
       </fieldset>}
       <div>
-        <p className="text-sm font-black">{es ? "Tu fotografía" : "A tua fotografia"}</p>
-        <UploadButton photo={photo} onPhoto={changePhoto} es={es} />
-        {photo && <div className="mt-4 rounded-2xl border border-[#eadfd8] bg-white p-3.5"><div className="flex items-center justify-between gap-3"><label htmlFor="mug-zoom" className="text-[11px] font-black text-[#59627b]">{es ? "Tamaño de la foto" : "Tamanho da fotografia"}</label><span className="text-[11px] font-black text-[#182443]">{Math.round(crop.zoom * 100)}%</span></div><input id="mug-zoom" type="range" min={CROP_LIMITS.minZoom} max={CROP_LIMITS.maxZoom} step="0.05" value={crop.zoom} onChange={(event) => setCrop(normalizeCrop({ ...crop, zoom: Number(event.target.value) }))} className="mt-2 w-full accent-[#ee5264]" /><p className="mt-2 text-[11px] leading-5 text-[#737b90]">{es ? "Arrastra la foto en cualquiera de las dos tazas para cambiar su posición." : "Arrasta a fotografia em qualquer uma das duas canecas para mudar a posição."}</p></div>}
-        <PrintFileNote printFile={printFile} photo={photo} es={es} />
+        <p className="text-sm font-black">{es ? "Imágenes de la taza" : "Imagens da caneca"}</p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div className="rounded-2xl border border-[#eadfd8] bg-[#fffaf5] p-3"><p className="text-xs font-black text-[#182443]">{es ? "Parte frontal" : "Parte frontal"}</p><UploadButton photo={photos[0]} onPhoto={(value) => changePhoto(0, value)} es={es} label={photos[0] ? (es ? "Cambiar imagen frontal" : "Alterar imagem frontal") : (es ? "Subir imagen frontal" : "Carregar imagem frontal")} /><PrintFileNote printFile={facePrintFile} photo={photos[0]} es={es} /></div>
+          <div className="rounded-2xl border border-[#eadfd8] bg-[#fffaf5] p-3"><p className="text-xs font-black text-[#182443]">{es ? "Parte trasera" : "Parte traseira"}</p><UploadButton photo={photos[1]} onPhoto={(value) => changePhoto(1, value)} es={es} label={photos[1] ? (es ? "Cambiar imagen trasera" : "Alterar imagem traseira") : (es ? "Subir imagen trasera" : "Carregar imagem traseira")} /><PrintFileNote printFile={facePrintFile} photo={photos[1]} es={es} /></div>
+        </div>
+        {(photos[0] || photos[1]) && <div className="mt-4 rounded-2xl border border-[#eadfd8] bg-white p-3.5"><p className="text-[11px] font-black text-[#59627b]">{es ? "Escala y posición" : "Tamanho e posição"}</p><div className="mt-3 grid gap-3 sm:grid-cols-2">{(["front", "back"] as const).map((side) => <label key={side} className="text-[11px] font-black text-[#182443]">{side === "front" ? (es ? "Frontal" : "Frontal") : (es ? "Trasera" : "Traseira")} · {Math.round(mugCrops[side].zoom * 100)}%<input aria-label={side === "front" ? "Front image zoom" : "Back image zoom"} type="range" min={CROP_LIMITS.minZoom} max={CROP_LIMITS.maxZoom} step="0.05" value={mugCrops[side].zoom} onChange={(event) => changeCrop(side, normalizeCrop({ ...mugCrops[side], zoom: Number(event.target.value) }))} className="mt-2 w-full accent-[#ee5264]" /></label>)}</div><p className="mt-2 text-[11px] leading-5 text-[#737b90]">{es ? "Arrastra cada imagen en su propia vista para cambiar su posición." : "Arrasta cada imagem na sua própria vista para mudar a posição."}</p></div>}
       </div>
     </div>
   );
   const preview = (
     <div className="flex min-h-[500px] flex-col items-center justify-center rounded-[22px] bg-gradient-to-b from-[#fbf5f0] to-[#f4ebe3] p-5 sm:p-8">
       <div className="grid w-full max-w-[760px] grid-cols-1 gap-8 sm:grid-cols-2 sm:gap-5">
-        <MugWrapView side="front" photo={photo} crop={crop} onCrop={setCrop} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista frontal" : "Vista frontal"} alt={es ? "Tu foto aparecerá aquí" : "A tua fotografia aparecerá aqui"} />
-        <MugWrapView side="back" photo={photo} crop={crop} onCrop={setCrop} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista trasera" : "Vista traseira"} alt={es ? "Tu foto aparecerá aquí" : "A tua fotografia aparecerá aqui"} />
+        <MugWrapView side="front" photo={photos[0]} crop={mugCrops.front} onCrop={(value) => changeCrop("front", value)} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista frontal" : "Vista frontal"} alt={es ? "Sube la imagen frontal" : "Carrega a imagem frontal"} />
+        <MugWrapView side="back" photo={photos[1]} crop={mugCrops.back} onCrop={(value) => changeCrop("back", value)} accent={accent} windowAspect={windowAspect} size={size} label={es ? "Vista trasera" : "Vista traseira"} alt={es ? "Sube la imagen trasera" : "Carrega a imagem traseira"} />
       </div>
-      <p className="mt-7 text-center text-xs font-bold text-[#737b90]">{es ? "Taza de cerámica · La misma fotografía aparece completa en la vista frontal y trasera" : "Caneca de cerâmica · A mesma fotografia aparece completa na vista frontal e traseira"}</p>
+      <p className="mt-7 text-center text-xs font-bold text-[#737b90]">{es ? "Taza de cerámica · Una imagen independiente en cada lado" : "Caneca de cerâmica · Uma imagem independente em cada lado"}</p>
     </div>
   );
-  return <StudioShell eyebrow={es ? "TAZAS PERSONALIZADAS" : "CANECAS PERSONALIZADAS"} title={es ? "Empieza cada mañana con tus mejores recuerdos" : "Começa cada manhã com as tuas melhores memórias"} body={es ? "Taza de cerámica con asa e interior de color. Elige el tamaño y el color, y añade tu foto favorita." : "Caneca de cerâmica com asa e interior de cor. Escolhe o tamanho e a cor, e adiciona a tua foto favorita."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más tazas" : "Mais canecas"} action={catalogAction(studio, cart, es, [photo], adminColors ? {} : { color: MUG_COLORS[color].es }, "/mugs", { printFile, zoom: crop.zoom, selection: { crop } })} />;
+  return <StudioShell eyebrow={es ? "TAZAS PERSONALIZADAS" : "CANECAS PERSONALIZADAS"} title={es ? "Empieza cada mañana con tus mejores recuerdos" : "Começa cada manhã com as tuas melhores memórias"} body={es ? "Taza de cerámica con asa e interior de color. Elige el tamaño y el color, y añade una imagen frontal y otra trasera." : "Caneca de cerâmica com asa e interior de cor. Escolhe o tamanho e a cor, e adiciona uma imagem frontal e outra traseira."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más tazas" : "Mais canecas"} action={catalogAction(studio, cart, es, photos, adminColors ? {} : { color: MUG_COLORS[color].es }, "/mugs", { printFile: facePrintFile, zoom: Math.max(mugCrops.front.zoom, mugCrops.back.zoom), hint: backHint, selection: { crop: mugCrops.front, mugCrops } })} />;
 }

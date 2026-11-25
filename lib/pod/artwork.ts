@@ -15,6 +15,8 @@ export type PrintSpec =
   // crop: how the customer framed the photo in the editor (fit "fill" only).
   // repeat: place the same complete framed artwork on both halves of a wrap (mugs).
   | { area: string; kind: "photo"; photoIndex: number; fit: PhotoFit; width: number; height: number; format: "jpg" | "png"; minDpiSize?: { widthMm: number; heightMm: number }; crop?: ImageCrop | null; repeat?: boolean }
+  // A Printful mug wrap composed from independent front and back uploads.
+  | { area: string; kind: "mug"; photoIndex: number; backPhotoIndex: number; width: number; height: number; format: "jpg"; crop: ImageCrop; backCrop: ImageCrop }
   // A strip of the customer's card pages side by side (greeting cards): the pages rendered at
   // checkout are composed in `pages` order (the product template's order, left to right) into one
   // file of exactly width × height px. Each page gets an equal slot; nothing is stretched.
@@ -58,6 +60,23 @@ export function printFileUrl(sourceUrl: string, spec: Extract<PrintSpec, { kind:
     : spec.fit === "pad" ? `c_pad,b_white,w_${spec.width},h_${spec.height}`
     : `c_crop,g_center,ar_${spec.width}:${spec.height}`;
   return `${match[1]}${transformation},q_100,f_${spec.format}/${match[2]}`;
+}
+
+export function mugFileUrl(frontUrl: string, backUrl: string, spec: Extract<PrintSpec, { kind: "mug" }>, frontSize?: { width: number; height: number } | null, backSize?: { width: number; height: number } | null) {
+  const front = frontUrl.match(CLOUDINARY_UPLOAD);
+  const back = backUrl.match(CLOUDINARY_UPLOAD);
+  if (!front || !back || front[1] !== back[1] || !frontSize?.width || !frontSize.height || !backSize?.width || !backSize.height) return null;
+  const halfWidth = Math.floor(spec.width / 2);
+  const cropTransform = (url: string, size: { width: number; height: number }, crop: ImageCrop) => {
+    const rect = cropRect(size, halfWidth / spec.height, crop);
+    return `c_crop,x_${Math.round(rect.left)},y_${Math.round(rect.top)},w_${Math.max(1, Math.round(rect.width))},h_${Math.max(1, Math.round(rect.height))}`;
+  };
+  const frontCrop = cropTransform(frontUrl, frontSize, spec.crop);
+  const backCrop = cropTransform(backUrl, backSize, spec.backCrop);
+  const backId = cloudinaryPublicId(backUrl);
+  if (!backId) return null;
+  const layer = `l_${backId.replace(/\//g, ":")},${backCrop},c_scale,w_${spec.width - halfWidth},h_${spec.height}/fl_layer_apply,g_east`;
+  return `${front[1]}${frontCrop}/c_scale,w_${halfWidth},h_${spec.height}/c_pad,g_west,b_white,w_${spec.width},h_${spec.height}/${layer}/q_100,f_${spec.format}/${front[2]}`;
 }
 
 // Public id of a Cloudinary upload URL: ".../image/upload/v123/folder/name.jpg" → "folder/name".

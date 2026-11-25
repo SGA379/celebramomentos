@@ -65,6 +65,11 @@ describe("Printful mug mapping", () => {
     expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Rojo" }, crop })).units[0].specs[0]).toMatchObject({ fit: "fill", width: 2700, height: 1050, crop, repeat: true });
   });
 
+  it("maps independent front and back mug crops into one POD wrap file", () => {
+    const mugCrops = { front: { zoom: 1, x: 0.2, y: 0.5 }, back: { zoom: 1.4, x: 0.8, y: 0.3 } };
+    expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "11 oz", options: { color: "Rojo" }, photoCount: 2, mugCrops })).units[0].specs[0]).toEqual({ area: "default", kind: "mug", photoIndex: 0, backPhotoIndex: 1, width: 2700, height: 1050, format: "jpg", crop: mugCrops.front, backCrop: mugCrops.back });
+  });
+
   it("blocks a colour Printful does not make in that size", () => {
     expect(mapOrderItem(ctx({ kind: "MUG", provider: "PRINTFUL", variantName: "15 oz", options: { color: "Naranja" } })).issues[0].code).toBe("unmapped");
   });

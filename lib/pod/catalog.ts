@@ -12,7 +12,7 @@
 // - Printeers (5 Nov 2026): product references and print areas come from the Printeers
 //   API per order item (chosen by the customer from the live catalog), not from this file.
 import type { PodProvider } from "@prisma/client";
-import { mmToPx, type ImageCrop } from "@/lib/crop";
+import { mmToPx, type ImageCrop, type MugCrops } from "@/lib/crop";
 import { POSTER_DPI } from "@/lib/print-quality";
 import { gelatoFormatMm, type PrintSpec } from "./artwork";
 import { GELATO_CALENDAR_UIDS, GELATO_POSTER_HANGER_UIDS, GELATO_TOUGH_CASE_UIDS, gelatoCalendarPageMm } from "./gelato-catalog";
@@ -33,6 +33,8 @@ export type ItemContext = {
   printeers?: { productReference: string; printMm: { width: number; height: number } | null; crop: ImageCrop | null } | null;
   // Mugs use this same crop for the complete Printful wrap canvas.
   crop?: ImageCrop | null;
+  // New mug designs have one independently framed upload for each side.
+  mugCrops?: MugCrops | null;
 };
 
 // One print shop line. Magnet packs become one line per photo (each magnet has its own picture).
@@ -105,6 +107,7 @@ function mapPrintful(ctx: ItemContext): ItemMapping {
   const variantId = ctx.podSku || (color ? PRINTFUL_MUG_VARIANTS[size][color] : undefined);
   if (!variantId) return { units: [], issues: [blocker("unmapped", `No Printful variant for the ${size} oz mug in colour "${optionValue(ctx.options, /^colou?r$|^cor$/i) || "?"}"`)] };
   if (!ctx.photoCount) return { units: [], issues: [blocker("missing_photos", "The order has no mug photo")] };
+  if (ctx.mugCrops) return { units: [{ productRef: String(variantId), specs: [{ area: "default", kind: "mug", photoIndex: 0, backPhotoIndex: 1, width: PRINTFUL_MUG_FILE[size].width, height: PRINTFUL_MUG_FILE[size].height, format: "jpg", crop: ctx.mugCrops.front, backCrop: ctx.mugCrops.back }] }], issues: [] };
   return { units: [{ productRef: String(variantId), specs: [{ area: "default", kind: "photo", photoIndex: 0, fit: "fill", ...PRINTFUL_MUG_FILE[size], format: "jpg", crop: ctx.crop || null, repeat: true }] }], issues: [] };
 }
 

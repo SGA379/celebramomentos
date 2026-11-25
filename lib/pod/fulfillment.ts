@@ -11,14 +11,14 @@
 // - Failures never lose the order: it stays FAILED with the error and is retried.
 import { Prisma, type OrderItem, type PodFulfillment, type PodProvider } from "@prisma/client";
 import { waitUntil } from "@vercel/functions";
-import { normalizeCrop, type ImageCrop } from "@/lib/crop";
+import { normalizeCrop, normalizeMugCrops, type ImageCrop } from "@/lib/crop";
 import { CALENDAR_COVER_INDEX, POD_PROVIDERS, podProviderFor, variantAttributes } from "@/lib/products";
 import { prisma } from "@/lib/server/prisma";
 import { CARD_SIZES } from "@/lib/data";
 import type { CardDesignSide } from "@/lib/store";
 import { STORED_STATUS, printStage } from "@/lib/order-progress";
 import { podProviderLabel } from "@/lib/products";
-import { checkPhotoResolution, checkPrintFileSize, isCloudinaryUrl, printFileUrl, type PhotoFit, type PrintSpec } from "./artwork";
+import { checkPhotoResolution, checkPrintFileSize, isCloudinaryUrl, mugFileUrl, printFileUrl, type PhotoFit, type PrintSpec } from "./artwork";
 import { mapOrderItem } from "./catalog";
 import { podAutoSubmit, podEnvironmentProblem, podMode } from "./config";
 import { PodApiError, redact } from "./http";
@@ -93,6 +93,7 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
     cardSku: asString(personalization.sku),
     printeers: printeersSelection(product.printeers),
     crop: kind === "MUG" ? normalizeCrop(product.crop as Partial<ImageCrop>) : null,
+    mugCrops: kind === "MUG" && product.mugCrops ? normalizeMugCrops(product.mugCrops as { front?: Partial<ImageCrop>; back?: Partial<ImageCrop> }, product.crop as Partial<ImageCrop>) : null,
   });
   const issues = [...mapping.issues];
   const artwork: ArtworkSlot[] = [];
@@ -111,6 +112,53 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
       const before = previous.find((slot) => slot.unit === unitIndex && slot.area === spec.area);
       const attached = before?.source === "admin" && before.url ? before : null;
       const required = spec.kind === "photo" ? (spec.width ? { width: spec.width, height: spec.height } : {}) : spec.kind !== "calendar" && spec.width && spec.height ? { width: spec.width, height: spec.height } : {};
+      if (spec.kind === "mug") {
+        if (attached) {
+          const verified = sizeOf(attached.url);
+          artwork.push({ kind: "photo", ...attached, productRef: unit.productRef, area: spec.area, width: spec.width, height: spec.height, format: spec.format, original: null, verified });
+          const problem = checkPrintFileSize({ width: spec.width, height: spec.height }, verified, `${prefix}Attached mug print file`);
+          if (problem) issues.push(problem);
+          continue;
+        }
+        const front = photos[spec.photoIndex];
+        const back = photos[spec.backPhotoIndex];
+        const signature = `${front || ""}|${back || ""}|${JSON.stringify(spec.crop)}|${JSON.stringify(spec.backCrop)}`;
+        if (!front || !back) {
+          issues.push({ code: "missing_photos", severity: "blocker", message: `${prefix}Both front and back mug photos are required` });
+          artwork.push({ kind: "photo", unit: unitIndex, productRef: unit.productRef, area: spec.area, url: null, source: null, width: spec.width, height: spec.height, format: spec.format, original: signature });
+          continue;
+        }
+        const frontSize = sizeOf(front);
+        const backSize = sizeOf(back);
+        const halfSpec = { area: spec.area, kind: "photo" as const, photoIndex: 0, fit: "fill" as const, width: Math.floor(spec.width / 2), height: spec.height, format: spec.format, crop: spec.crop };
+        const backHalfSpec = { ...halfSpec, crop: spec.backCrop };
+        const frontWarning = checkPhotoResolution(halfSpec, frontSize, { accepted: product.qualityAccepted === true });
+        const backWarning = checkPhotoResolution(backHalfSpec, backSize, { accepted: product.qualityAccepted === true });
+        if (frontWarning) issues.push({ ...frontWarning, message: `${prefix}Front photo: ${frontWarning.message}` });
+        if (backWarning) issues.push({ ...backWarning, message: `${prefix}Back photo: ${backWarning.message}` });
+        const reusable = before?.source === "design" && before.url && before.verified && before.original === signature && before.width === spec.width && before.height === spec.height && before.format === spec.format ? { url: before.url, ...before.verified } : null;
+        let stored = reusable;
+        let failure: string | null = null;
+        if (!stored) {
+          if (!isCloudinaryUrl(front) || !isCloudinaryUrl(back) || !files.has(front) || !files.has(back)) failure = "the front and back photos are not uploads from this shop";
+          else {
+            const url = mugFileUrl(front, back, spec, frontSize, backSize);
+            if (!url) failure = "the front and back photos could not be composed";
+            else stored = await renderPrintFile({ orderId: item.orderId, itemId: item.id, unit: unitIndex, area: spec.area, sourceUrl: front, sourceUrl2: back, sourceSize: frontSize, sourceSize2: backSize, spec, composedUrl: url }).catch((reason) => { failure = reason instanceof Error ? reason.message : "unknown error"; return null; });
+          }
+        }
+        if (stored) {
+          const verified = { width: stored.width, height: stored.height };
+          artwork.push({ kind: "photo", unit: unitIndex, productRef: unit.productRef, area: spec.area, url: stored.url, source: "design", width: spec.width, height: spec.height, format: spec.format, original: signature, verified });
+          const problem = checkPrintFileSize({ width: spec.width, height: spec.height }, verified, `${prefix}Mug print file`);
+          if (problem) issues.push(problem);
+          continue;
+        }
+        logPod("mug print file not rendered", { itemId: item.id, unit: unitIndex, area: spec.area, failure });
+        artwork.push({ kind: "photo", unit: unitIndex, productRef: unit.productRef, area: spec.area, url: mugFileUrl(front, back, spec, frontSize, backSize), source: "customer", width: spec.width, height: spec.height, format: spec.format, original: signature, verified: null });
+        issues.push({ code: "print_file_unverified", severity: "warning", message: `${prefix}The front/back mug print file could not be saved (${failure}); retry it before sending` });
+        continue;
+      }
       if (spec.kind === "pages") {
         // Greeting cards: the print file is composed automatically from the 4 pages the customer's
         // browser rendered at checkout (the customer's real design), in the SKU's page order and at its
