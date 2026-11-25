@@ -103,6 +103,7 @@ export const cartLineSchema = z.object({
     }).optional(),
   }),
 });
+export const cartSyncSchema = z.object({ items: z.array(cartLineSchema).max(100) });
 export const cartQuantitySchema = z.object({ id: z.string().min(1), quantity: z.number().int().min(1).max(99) });
 export const contactSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -122,6 +123,7 @@ export const customerCheckoutSchema = z.object({
   billingAddress: z.string().max(300).optional(),
   payment: z.enum(["card", "paypal"]),
   discountCode: z.string().max(40).optional(),
+  cartLineIds: z.array(z.string().cuid()).max(100).optional(),
 });
 export const adminMessageReplySchema = z.object({ text: z.string().trim().min(1).max(2000) });
 export const productVariantSchema = z.object({

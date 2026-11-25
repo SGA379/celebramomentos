@@ -22,3 +22,7 @@ export function getSessionUser({ refresh = false } = {}) {
 export function clearSessionUser() {
   request = Promise.resolve(null);
 }
+
+export function notifySessionChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("celebra-session-change"));
+}

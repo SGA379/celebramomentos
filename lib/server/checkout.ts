@@ -20,7 +20,7 @@ export type CheckoutLine = { name: string; quantity: number; unitPriceCents: num
 // edited prices apply and deleted/inactive products cannot be bought.
 export async function createPendingOrder({ customerId, input, idempotencyKey, provider }: { customerId: string; input: CheckoutInput; idempotencyKey: string; provider: "stripe" | "paypal" }) {
   await ensureCatalog();
-  const cartLines = await prisma.cartLine.findMany({ where: { customerId }, orderBy: { createdAt: "asc" } });
+  const cartLines = await prisma.cartLine.findMany({ where: { customerId, ...(input.cartLineIds?.length ? { id: { in: input.cartLineIds } } : {}) }, orderBy: { createdAt: "asc" } });
   if (!cartLines.length) throw new CatalogError("Tu cesta está vacía. Añade un producto antes de pagar.", 400);
   const priced = await Promise.all(cartLines.map(async (line) => {
     const item = toCartItem(line);
@@ -61,6 +61,7 @@ export async function createPendingOrder({ customerId, input, idempotencyKey, pr
       shippingCents,
       discountCents,
       totalCents,
+      cartLineIds: priced.map(({ line }) => line.id) as Prisma.InputJsonValue,
       shippingAddress,
       items: { create: priced.map((row) => {
         const { line, item, resolved } = row;

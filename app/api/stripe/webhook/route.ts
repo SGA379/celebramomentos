@@ -39,7 +39,8 @@ export async function POST(request: NextRequest) {
         if (claim.count === 0) return;
         await tx.payment.update({ where: { id: payment.id }, data: { status: "SUCCEEDED", stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined, raw: { eventId: event.id, type: event.type } } });
         if (order.discountUsages.length) await tx.discount.update({ where: { id: order.discountUsages[0].discountId }, data: { usedCount: { increment: 1 } } });
-        if (order.customerId) await tx.cartLine.deleteMany({ where: { customerId: order.customerId } });
+        const lineIds = Array.isArray(order.cartLineIds) ? order.cartLineIds.filter((value): value is string => typeof value === "string") : [];
+        if (order.customerId) await tx.cartLine.deleteMany({ where: lineIds.length ? { customerId: order.customerId, id: { in: lineIds } } : { customerId: order.customerId } });
       } else if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
         if (order.status !== "PENDING") return;
         await tx.order.updateMany({ where: { id: order.id, status: "PENDING" }, data: { status: "CANCELLED" } });

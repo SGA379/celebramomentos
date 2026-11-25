@@ -34,7 +34,8 @@ export async function POST(request: NextRequest) {
         if (claim.count === 0) return false;
         await tx.payment.updateMany({ where: { orderId: order.id, status: "PENDING" }, data: { status: "SUCCEEDED", stripeCheckoutId: session.id, stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined } });
         if (order.discountUsages.length) await tx.discount.update({ where: { id: order.discountUsages[0].discountId }, data: { usedCount: { increment: 1 } } });
-        await tx.cartLine.deleteMany({ where: { customerId: customer.id } });
+        const lineIds = Array.isArray(order.cartLineIds) ? order.cartLineIds.filter((value): value is string => typeof value === "string") : [];
+        await tx.cartLine.deleteMany({ where: lineIds.length ? { customerId: customer.id, id: { in: lineIds } } : { customerId: customer.id } });
         return true;
       });
       if (claimed) {
