@@ -23,7 +23,7 @@ import { mapOrderItem } from "./catalog";
 import { podAutoSubmit, podEnvironmentProblem, podMode } from "./config";
 import { PodApiError, redact } from "./http";
 import { pdfDeliverable, renderCalendarFile, renderCompositeFile, renderPrintFile, uploadedFiles, type UploadedFile } from "./print-files";
-import { boxPixels, calendarLayout, monthName, type CalendarLanguage } from "./calendar-pdf";
+import { boxPixels, calendarLayout, CALENDAR_PDF_VERSION, monthName, type CalendarLanguage } from "./calendar-pdf";
 import { podAdapter } from "./providers";
 import { mergeTracking, readTracking, resolveItems, trackingDates, withStatusChange } from "./tracking";
 import type { PodFulfillmentStatus, PodIssue, PodMode, ProviderOrderState, Recipient, SubmissionLine } from "./types";
@@ -209,8 +209,9 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
         // The studio shows next year's calendar (CalendarStudio); the order's date stands for the day it was designed.
         const year = item.createdAt.getFullYear() + 1;
         const language = await calendarLanguage(item.orderId);
-        // The cover joins the signature only when there is one, so files made before covers existed stay valid.
-        const signature = [year, language, `${spec.widthMm}x${spec.heightMm}`, ...monthPhotos.map((url) => url || "-"), ...(cover ? [`cover:${cover}`] : [])].join("|");
+        // The generator version is part of the signature: a PDF made by an older generator (e.g. the ones Gelato's
+        // preflight could not process) is made again instead of being reused.
+        const signature = [year, language, `${spec.widthMm}x${spec.heightMm}`, ...monthPhotos.map((url) => url || "-"), ...(cover ? [`cover:${cover}`] : []), `pdf:v${CALENDAR_PDF_VERSION}`].join("|");
         const pageMm = { width: spec.widthMm, height: spec.heightMm };
         const base = { kind: "calendar" as const, unit: unitIndex, productRef: unit.productRef, area: spec.area, description: spec.description, format: "pdf" as const };
         if (!monthPhotos.some(Boolean)) {
@@ -380,6 +381,9 @@ export async function refreshReadiness(fulfillmentId: string, { replan = false }
       await prisma.orderItem.update({ where: { id: item.id }, data: { podProductRef: plan.productRef, podArtwork: plan.artwork as unknown as Prisma.InputJsonValue, podIssues: plan.issues as unknown as Prisma.InputJsonValue } });
     }
   }
+  // The shop already has an order for it (one it failed or cancelled): it stays FAILED, with the shop's
+  // reason, until an admin resends it as a new order (resendFulfillment) or cancels it.
+  if (fulfillment.providerOrderId) return prisma.podFulfillment.findUnique({ where: { id: fulfillmentId }, include: { items: true } });
   const items = replan ? await prisma.orderItem.findMany({ where: { podFulfillmentId: fulfillmentId } }) : fulfillment.items;
   const problem = podEnvironmentProblem() ?? podAdapter(fulfillment.provider).configurationProblem(podMode());
   const issues = items.flatMap((item) => readIssues(item.podIssues));
@@ -437,8 +441,20 @@ function linesOf(items: OrderItem[]): SubmissionLine[] {
   });
 }
 
-async function saveState(fulfillmentId: string, state: ProviderOrderState, extra: Prisma.PodFulfillmentUpdateInput = {}) {
+// A print order the shop cancelled by itself (Gelato cancels an order whose file it could not process; a
+// draft deleted in the shop's dashboard reads as cancelled too) was never produced. Recording it as
+// CANCELLED would let the customer's order look shipped once its other print orders ship (cancelled print
+// orders are ignored by printStage), so it is recorded as FAILED with the reason, for an admin to resend or
+// cancel. Pure, for tests.
+export function unexpectedCancellation(currentStatus: PodFulfillmentStatus, state: ProviderOrderState, label: string, cancelledHere: boolean): ProviderOrderState | null {
+  if (cancelledHere || state.status !== "CANCELLED" || !["SUBMITTING", "SUBMITTED", "IN_PRODUCTION", "FAILED"].includes(currentStatus)) return null;
+  const reason = state.problem ? ` ${state.problem}` : "";
+  return { ...state, status: "FAILED", problem: `${label} cancelled this order on its side (${state.providerStatus}); it was not produced.${reason} Fix the cause and use “Resend as new order”, or cancel it here if the customer no longer wants it.`.slice(0, 900) };
+}
+
+async function saveState(fulfillmentId: string, incoming: ProviderOrderState, extra: Prisma.PodFulfillmentUpdateInput = {}, { cancelledHere = false } = {}) {
   const current = await prisma.podFulfillment.findUniqueOrThrow({ where: { id: fulfillmentId }, include: { items: { select: { id: true, podProductRef: true } } } });
+  const state = unexpectedCancellation(current.status, incoming, podProviderLabel(current.provider), cancelledHere) ?? incoming;
   // Never move backwards (e.g. a late "in production" push after "shipped").
   const rank: Record<string, number> = { SUBMITTED: 1, IN_PRODUCTION: 2, SHIPPED: 3, DELIVERED: 4 };
   const status = rank[current.status] && rank[state.status] && rank[state.status] < rank[current.status] ? current.status : state.status;
@@ -485,6 +501,10 @@ export async function submitFulfillment(fulfillmentId: string, { allowWarnings =
   const blockers = issues.filter((issue) => issue.severity === "blocker");
   const allowed: PodFulfillmentStatus[] = ["READY", "FAILED", ...(allowWarnings && !blockers.length ? (["NEEDS_ATTENTION"] as PodFulfillmentStatus[]) : [])];
   if (!allowed.includes(fulfillment.status)) return { ok: false, status: fulfillment.status, message: blockers.length ? blockers.map((issue) => issue.message).join(" · ") : fulfillment.lastError || `Print order is already ${fulfillment.status.toLowerCase().replace("_", " ")}` };
+  // The shop already has an order under this reference that it failed: sending again would only find that
+  // same failed order (or, at a shop without a reference lookup, create a duplicate). It is resent as a new
+  // order on purpose instead (resendFulfillment).
+  if (fulfillment.providerOrderId) return { ok: false, status: fulfillment.status, message: `${podProviderLabel(fulfillment.provider)} already has order ${fulfillment.providerOrderId} for this print order (${fulfillment.providerStatus || fulfillment.status.toLowerCase()}). Fix the cause, then use “Resend as new order”.` };
   const mode = podMode();
   const adapter = podAdapter(fulfillment.provider);
   const problem = podEnvironmentProblem() ?? adapter.configurationProblem(mode);
@@ -535,6 +555,71 @@ export async function confirmDraft(fulfillmentId: string): Promise<SubmitResult>
   return { ok: true, status: saved.status };
 }
 
+// Whether the shop's previous order can no longer be produced (or charged). Gelato cancels the payment of an
+// order it failed (financialStatus "canceled"), so such an order is dead even though it reads "failed".
+function previousOrderDead(provider: PodProvider, state: ProviderOrderState) {
+  if (state.status === "CANCELLED") return true;
+  const raw = asObject(state.raw);
+  return provider === "GELATO" && state.status === "FAILED" && String(raw.financialStatus || "").toLowerCase() === "canceled";
+}
+
+// Sends a print order again as a NEW order at the shop after the shop failed or cancelled the previous one
+// (e.g. a print file its preflight refused). Only on an admin's request. Safety:
+// - the customer's payment is only read: never charged again, never refunded;
+// - the previous order is read from the shop first and must be dead there (cancelled, or a Gelato order it
+//   failed and stopped charging); one the shop only marks failed is cancelled there first. So two orders for
+//   the same items never exist;
+// - only in the mode it was first sent in (a test-paid order is never resent as a real one);
+// - claimed atomically on (status, previous shop order id): two clicks resend it once;
+// - the new order gets a new reference (…-R2, -R3…) and its print files are made again (planItem).
+export async function resendFulfillment(fulfillmentId: string): Promise<SubmitResult> {
+  const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId } });
+  if (!fulfillment) return { ok: false, status: "FAILED", message: "Print order not found" };
+  const label = podProviderLabel(fulfillment.provider);
+  const previousId = fulfillment.providerOrderId;
+  if (!previousId) return { ok: false, status: fulfillment.status, message: "The print shop never accepted this print order: use “Retry now” instead" };
+  if (!["FAILED", "CANCELLED"].includes(fulfillment.status) || fulfillment.shippedAt) return { ok: false, status: fulfillment.status, message: "Only a print order the print shop failed or cancelled, and that never shipped, can be resent" };
+  if (!(await orderIsPaid(fulfillment.orderId))) return { ok: false, status: fulfillment.status, message: "The order payment is not verified" };
+  const mode: PodMode = fulfillment.mode === "live" ? "live" : "draft";
+  if (podMode() !== mode) return { ok: false, status: fulfillment.status, message: `It was sent as a ${mode} order but the site now runs in ${podMode()} mode; it cannot be resent from here` };
+  const adapter = podAdapter(fulfillment.provider);
+  const problem = podEnvironmentProblem() ?? adapter.configurationProblem(mode);
+  if (problem) return { ok: false, status: fulfillment.status, message: problem };
+
+  let previous: ProviderOrderState | null;
+  try {
+    previous = await adapter.fetchStatus(previousId, mode);
+    if (previous && !previousOrderDead(fulfillment.provider, previous) && previous.status === "FAILED") previous = await adapter.cancel(previousId, mode);
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : "unknown error";
+    logPod("resend check failed", { fulfillmentId, provider: fulfillment.provider, message });
+    return { ok: false, status: fulfillment.status, message: `${label} order ${previousId} could not be checked or cancelled (${message}); nothing was resent` };
+  }
+  if (!previous) return { ok: false, status: fulfillment.status, message: `${label} gives no status for order ${previousId}; nothing was resent` };
+  if (!previousOrderDead(fulfillment.provider, previous)) return { ok: false, status: fulfillment.status, message: `${label} order ${previousId} is “${previous.providerStatus}”, not cancelled: it may still be produced, so nothing was resent. Refresh its status, or cancel it first` };
+
+  const base = fulfillment.reference.replace(/-R\d+$/, "");
+  const reference = `${base}-R${Number(fulfillment.reference.match(/-R(\d+)$/)?.[1] ?? 1) + 1}`;
+  const note = `Resent as ${reference}: ${label} order ${previousId} (${previous.providerStatus}) was not produced`;
+  const before = readTracking(fulfillment.tracking);
+  const tracking = { shipments: [], estimatedDelivery: null, expectedDispatch: null, history: [...(before.history || []), { at: new Date().toISOString(), description: note, location: null }].slice(-50) };
+  try {
+    const claimed = await prisma.podFulfillment.updateMany({
+      where: { id: fulfillmentId, status: fulfillment.status, providerOrderId: previousId },
+      data: { status: "NEEDS_ATTENTION", reference, providerOrderId: null, providerStatus: null, carrier: null, trackingNumber: null, trackingUrl: null, attempts: 0, nextAttemptAt: null, submittedAt: null, lastSyncedAt: null, lastError: note, lastResponse: Prisma.JsonNull, tracking: tracking as unknown as Prisma.InputJsonValue },
+    });
+    if (claimed.count !== 1) return { ok: false, status: fulfillment.status, message: "Its state changed meanwhile; refresh and try again" };
+  } catch (reason) {
+    if (reason instanceof Prisma.PrismaClientKnownRequestError && reason.code === "P2002") return { ok: false, status: fulfillment.status, message: `Reference ${reference} is already used; refresh and try again` };
+    throw reason;
+  }
+  logPod("resending print order", { fulfillmentId, provider: fulfillment.provider, previousId, previousStatus: previous.providerStatus, reference });
+  // Print files are made again (a calendar PDF from an older generator is replaced) and checked.
+  const ready = await refreshReadiness(fulfillmentId, { replan: true });
+  if (ready?.status !== "READY") return { ok: false, status: ready?.status ?? "NEEDS_ATTENTION", message: `Ready to resend as ${reference}, but held: ${ready?.lastError || "check the print files"}` };
+  return submitFulfillment(fulfillmentId);
+}
+
 // Cancels a print order. One not sent yet is simply marked cancelled (it is never sent); one sent is
 // cancelled at the print shop first, which only works before production starts. Shipped orders and one being
 // sent right now are refused. Never touches the payment: refunds are done in Stripe / PayPal.
@@ -550,8 +635,12 @@ export async function cancelFulfillment(fulfillmentId: string): Promise<SubmitRe
     return claimed.count === 1 ? { ok: true, status: "CANCELLED" } : { ok: false, status: fulfillment.status, message: "Its state changed meanwhile; refresh and try again" };
   }
   try {
-    const state = await podAdapter(fulfillment.provider).cancel(fulfillment.providerOrderId, fulfillment.mode === "live" ? "live" : "draft");
-    const saved = await saveState(fulfillmentId, { ...state, problem: null }, { nextAttemptAt: null });
+    const adapter = podAdapter(fulfillment.provider);
+    const mode = fulfillment.mode === "live" ? "live" : "draft";
+    // An order the shop already failed and stopped (e.g. Gelato after a refused file) is only closed here.
+    const current = fulfillment.status === "FAILED" ? await adapter.fetchStatus(fulfillment.providerOrderId, mode) : null;
+    const state = current && previousOrderDead(fulfillment.provider, current) ? { ...current, status: "CANCELLED" as const } : await adapter.cancel(fulfillment.providerOrderId, mode);
+    const saved = await saveState(fulfillmentId, { ...state, problem: null }, { nextAttemptAt: null }, { cancelledHere: true });
     return { ok: saved.status === "CANCELLED", status: saved.status, ...(saved.status === "CANCELLED" ? {} : { message: "The print shop did not cancel it" }) };
   } catch (reason) {
     const message = reason instanceof Error ? reason.message : "Unknown error";

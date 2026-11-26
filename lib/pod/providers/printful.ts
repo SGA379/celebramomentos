@@ -132,6 +132,28 @@ export function buildPrintfulOrder(input: SubmissionInput) {
   };
 }
 
+export type PrintfulApiHealth = { state: "connected" | "not_configured" | "unavailable"; detail: string };
+
+// Checks the token and store choice with a read-only call (GET /stores), for the admin page: a revoked or
+// expired token answers 401, and an account-wide token that can see several stores needs PRINTFUL_STORE_ID
+// (orders are store-specific). Never returns the token.
+export async function checkPrintfulApi(fetchImpl?: FetchLike): Promise<PrintfulApiHealth> {
+  const { token, storeId } = printfulConfig();
+  if (!token) return { state: "not_configured", detail: "PRINTFUL_PRIVATE_TOKEN is not set" };
+  try {
+    const { body } = await printfulRequest<{ result?: { id?: number; name?: string }[] }>("/stores", {}, fetchImpl);
+    const stores = Array.isArray(body?.result) ? body.result : [];
+    if (!stores.length) return { state: "unavailable", detail: "The Printful token can see no store" };
+    if (storeId && !stores.some((store) => String(store.id) === storeId)) return { state: "unavailable", detail: `PRINTFUL_STORE_ID ${storeId} is not a store this token can use` };
+    if (!storeId && stores.length > 1) return { state: "unavailable", detail: `The token can use ${stores.length} stores: set PRINTFUL_STORE_ID to the store orders go to` };
+    const store = storeId ? stores.find((item) => String(item.id) === storeId)! : stores[0];
+    return { state: "connected", detail: `Printful API is authenticated (store “${store.name || store.id}”)` };
+  } catch (reason) {
+    if (reason instanceof PodApiError && (reason.status === 401 || reason.status === 403)) return { state: "unavailable", detail: `Printful rejected the API token (HTTP ${reason.status}): create a new private token for the store and set PRINTFUL_PRIVATE_TOKEN` };
+    return { state: "unavailable", detail: reason instanceof Error ? reason.message.slice(0, 160) : "Printful API could not be reached" };
+  }
+}
+
 export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments(providerOrderId: string): Promise<PrintfulV2Shipment[]> } {
   const request = <T>(path: string, init: RequestInit = {}) => {
     const { token, storeId, baseUrl } = printfulConfig();

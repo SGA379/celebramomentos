@@ -23,7 +23,8 @@ type Fulfillment = {
   order: { id: string; number: string; email: string; status: string; totalCents: number; createdAt: string; shippingAddress: Record<string, string> };
   items: Item[];
 };
-type Data = { counts: Record<string, number>; unprepared: { id: string; number: string; email: string; createdAt: string; totalCents: number }[]; fulfillments: Fulfillment[] };
+type ApiHealth = { state: "connected" | "not_configured" | "unavailable"; detail: string };
+type Data = { config?: { apiHealth?: Partial<Record<PodProvider, ApiHealth>> }; counts: Record<string, number>; unprepared: { id: string; number: string; email: string; createdAt: string; totalCents: number }[]; fulfillments: Fulfillment[] };
 
 const STATUS_LABEL: Record<string, string> = { NEEDS_ATTENTION: "Needs attention", READY: "Ready", SUBMITTING: "Sending", SUBMITTED: "Sent", IN_PRODUCTION: "In production", SHIPPED: "Shipped", DELIVERED: "Delivered", CANCELLED: "Cancelled", FAILED: "Failed" };
 const STATUS_TONE: Record<string, "green" | "amber" | "rose" | "slate"> = { NEEDS_ATTENTION: "amber", READY: "slate", SUBMITTING: "slate", SUBMITTED: "green", IN_PRODUCTION: "green", SHIPPED: "green", DELIVERED: "green", CANCELLED: "rose", FAILED: "rose" };
@@ -83,6 +84,11 @@ export default function AdminFulfillmentPage() {
 
   return <AdminShell><AdminPageHeader eyebrow="FULFILMENT" title="Print orders" body="Paid orders split by print shop (Prodigi, Gelato, Printful, Printeers): what was sent, its status and tracking, and anything that needs you." />
 
+    {/* Print shops whose API rejects our credentials: their orders fail until the setting is fixed. */}
+    {data?.config?.apiHealth && Object.entries(data.config.apiHealth).some(([, health]) => health && health.state !== "connected") && <section role="alert" className="mt-4 rounded-2xl border border-[#f3c6c2] bg-[#fff0e8] p-4 text-xs font-bold text-[#c94758]">
+      {Object.entries(data.config.apiHealth).filter(([, health]) => health && health.state !== "connected").map(([name, health]) => <p key={name}>{POD_PROVIDER_LABELS[name as PodProvider]}: {health!.detail}</p>)}
+    </section>}
+
     {data && data.unprepared.length > 0 && <section className="mt-4 rounded-2xl border border-[#e4e7ee] bg-white p-4">
       <p className="text-sm font-black">Paid orders without print orders ({data.unprepared.length})</p>
       <p className="mt-1 text-xs text-[#737b90]">Usually orders from before print-on-demand was set up. Create their print orders only if they were not already made by hand.</p>
@@ -121,7 +127,10 @@ export default function AdminFulfillmentPage() {
 function Detail({ item, mode, busy, onClose, act, onToast }: { item: Fulfillment; mode: "draft" | "live"; busy: string; onClose: () => void; act: (label: string, payload: Record<string, unknown>, success: string) => Promise<void>; onToast: (message: string) => void }) {
   const issues = item.items.flatMap((line) => line.podIssues);
   const onlyWarnings = issues.some((issue) => issue.severity === "warning") && issues.every((issue) => issue.severity !== "blocker");
-  const canSend = item.status === "READY" || item.status === "FAILED" || (item.status === "NEEDS_ATTENTION" && onlyWarnings);
+  // A print order the shop already has (and failed or cancelled) is not sent again under the same reference:
+  // it is resent as a new order after the cause is fixed.
+  const canSend = !item.providerOrderId && (item.status === "READY" || item.status === "FAILED" || (item.status === "NEEDS_ATTENTION" && onlyWarnings));
+  const canResend = Boolean(item.providerOrderId) && ["FAILED", "CANCELLED"].includes(item.status) && !item.shippedAt;
   const address = item.order.shippingAddress || {};
   const button = (label: string, text: string, payload: Record<string, unknown>, success: string, tone = "bg-[#182443] text-white", confirm?: string) => <button type="button" disabled={Boolean(busy)} onClick={() => { if (confirm && !window.confirm(confirm)) return; void act(label, payload, success); }} className={`inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-xs font-black disabled:opacity-50 ${tone}`}>{busy === label && <Spinner size={13} />}{text}</button>;
 
@@ -146,7 +155,8 @@ function Detail({ item, mode, busy, onClose, act, onToast }: { item: Fulfillment
 
       <div className="mt-5 flex flex-wrap gap-2">
         {canSend && button("send", item.status === "FAILED" ? "Retry now" : onlyWarnings && item.status === "NEEDS_ATTENTION" ? "Send anyway" : "Send to print shop", { action: "submit", id: item.id, allowWarnings: onlyWarnings }, "Sent to the print shop", "bg-[#ee5264] text-white", mode === "live" ? "This creates a real, paid order at the print shop. Continue?" : undefined)}
-        {["NEEDS_ATTENTION", "READY", "FAILED"].includes(item.status) && button("recheck", "Check again", { action: "recheck", id: item.id }, "Checked again", "border border-[#dfd3cc] text-[#182443]")}
+        {canResend && button("resend", "Resend as new order", { action: "resend", id: item.id }, "Resent to the print shop as a new order", "bg-[#ee5264] text-white", `${podProviderLabel(item.provider)} did not produce order ${item.providerOrderId}. Make the print files again and send a NEW ${mode === "live" ? "real, paid " : "test "}order to ${podProviderLabel(item.provider)}? The previous order is checked first and must be cancelled there. The customer is not charged again.`)}
+        {["NEEDS_ATTENTION", "READY", "FAILED"].includes(item.status) && !item.providerOrderId && button("recheck", "Check again", { action: "recheck", id: item.id }, "Checked again", "border border-[#dfd3cc] text-[#182443]")}
         {item.providerOrderId && !["CANCELLED"].includes(item.status) && button("sync", "Refresh status & tracking", { action: "sync", id: item.id }, "Status and tracking refreshed from the print shop", "border border-[#dfd3cc] text-[#182443]")}
         {["NEEDS_ATTENTION", "READY", "FAILED", "SUBMITTED", "IN_PRODUCTION"].includes(item.status) && button("cancel", "Cancel print order", { action: "cancel", id: item.id }, "Print order cancelled", "border border-[#f3c6c2] text-[#c94758]", item.providerOrderId ? `Cancel this order at ${podProviderLabel(item.provider)}? It only works before production starts. The customer's payment is not refunded automatically.` : "Cancel this print order? It will never be sent to the print shop.")}
       </div>

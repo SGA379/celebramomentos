@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PodApiError, podRequest, redact } from "@/lib/pod/http";
 import { INACTIVE_PROVIDER, podAdapter } from "@/lib/pod/providers";
 import { internationalPhone, printeersAdapter, printeersIdentifier, printeersStatus, splitName, splitStreet } from "@/lib/pod/providers/printeers";
-import { checkGelatoApi, gelatoAdapter, parseGelatoOrder } from "@/lib/pod/providers/gelato";
-import { parsePrintfulOrder, printfulAdapter } from "@/lib/pod/providers/printful";
+import { checkGelatoApi, gelatoAdapter, gelatoRefusal, parseGelatoOrder } from "@/lib/pod/providers/gelato";
+import { checkPrintfulApi, parsePrintfulOrder, printfulAdapter } from "@/lib/pod/providers/printful";
 import { parseProdigiOrder, prodigiAdapter } from "@/lib/pod/providers/prodigi";
 import type { SubmissionInput } from "@/lib/pod/types";
 
@@ -285,5 +285,94 @@ describe("Printeers (API v1)", () => {
     expect(internationalPhone("0034 600 111 222", "ES")).toBe("+34600111222");
     expect(internationalPhone("+34 600 111 222", "ES")).toBe("+34600111222");
     expect(internationalPhone(null, "ES")).toBe("");
+  });
+});
+
+// ── Live failures of Nov 2026 ──────────────────────────────────────────────────
+
+describe("Gelato refusals", () => {
+  // Shape of GET /v4/orders/{id} for the refused A3 calendar (ids shortened).
+  const refused = {
+    id: "ea9c", orderType: "order", fulfillmentStatus: "failed", financialStatus: "canceled",
+    refusalReason: "Can't process print file item #cmww - PDFToolBox failed: preflight report was not generated. Issue presents on pages: 1.\nCan't process print file item #cmww",
+    items: [{ id: "i1", itemReferenceId: "cmww", fulfillmentStatus: "failed", refusalReason: "Can't process print file item #cmww" }, { id: "i2", itemReferenceId: "cmwp", fulfillmentStatus: "failed", refusalReason: null }],
+  };
+
+  it("shows the admin Gelato's own reason instead of only 'open the dashboard'", () => {
+    expect(gelatoRefusal(refused)).toBe("Can't process print file item #cmww - PDFToolBox failed: preflight report was not generated. Issue presents on pages: 1.");
+    expect(parseGelatoOrder(refused)).toMatchObject({ status: "FAILED", problem: expect.stringContaining("PDFToolBox failed: preflight report was not generated") });
+  });
+
+  it("keeps the reason when Gelato later cancels the failed order", () => {
+    const cancelled = { ...refused, fulfillmentStatus: "canceled", refusalReason: "Can't process print file item #x - Document page dimension matches the product size but does not include bleeds.." };
+    expect(parseGelatoOrder(cancelled)).toMatchObject({ status: "CANCELLED", problem: expect.stringContaining("does not include bleeds") });
+    expect(parseGelatoOrder({ id: "g", fulfillmentStatus: "canceled" }).problem).toBeNull();
+  });
+
+  it("reads the order's financial status so a failed, uncharged order can be recognised", async () => {
+    const { impl } = fakeFetch([{ status: 200, body: refused }]);
+    expect(await gelatoAdapter(impl).fetchStatus("ea9c", "live")).toMatchObject({ status: "FAILED", raw: { financialStatus: "canceled" } });
+  });
+
+  it("sends a calendar as one line with its 14-page PDF as the default file", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: { id: "g1", orderType: "order", fulfillmentStatus: "created" } }]);
+    const calendar = { ...input("live", "wall_calendar_unified_pf_a3-11x16-5-inch_pt_250-gsm-100lb-coated-silk_cl_4-4_bt_wire-with-hook-top_ct_none_prt_none_ver"), lines: [{ itemId: "cal", productRef: "wall_calendar_unified_pf_a3-11x16-5-inch_pt_250-gsm-100lb-coated-silk_cl_4-4_bt_wire-with-hook-top_ct_none_prt_none_ver", quantity: 1, name: "Calendario", pageCount: 14, files: [{ area: "default", url: "https://res.cloudinary.com/x/raw/upload/v2/cal.pdf", source: "design" as const }] }] };
+    await gelatoAdapter(impl).submit(calendar);
+    expect(bodyOf(calls[0]).items[0]).toMatchObject({ productUid: expect.stringContaining("wall_calendar"), files: [{ type: "default", url: "https://res.cloudinary.com/x/raw/upload/v2/cal.pdf" }] });
+  });
+});
+
+describe("Printful token and order submission", () => {
+  it("surfaces a rejected token (the live failure: HTTP 401 'The access token provided is invalid') as a non-retryable error", async () => {
+    const { impl, calls } = fakeFetch([{ status: 401, body: { code: 401, result: "The access token provided is invalid.", error: { reason: "Unauthorized", message: "The access token provided is invalid." } } }]);
+    await expect(printfulAdapter(impl).submit(input("live", "11050"))).rejects.toMatchObject({ status: 401, retryable: false, message: "PRINTFUL answered HTTP 401: The access token provided is invalid." });
+    // One request, no lookup or second attempt that could create a duplicate.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.printful.com/orders?confirm=true");
+  });
+
+  it("confirms real orders only in live mode and never sends the token anywhere but the Authorization header", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: { result: { id: 9, status: "pending" } } }]);
+    await printfulAdapter(impl).submit(input("live", "11050"));
+    expect(calls[0].url).toBe("https://api.printful.com/orders?confirm=true");
+    expect(JSON.stringify(bodyOf(calls[0]))).not.toContain("pf-token");
+  });
+
+  it("does not hide a server error behind a lookup (it is retried later with the same external id)", async () => {
+    const { impl, calls } = fakeFetch([{ status: 502, body: "Bad gateway" }]);
+    await expect(printfulAdapter(impl).submit(input("live", "11050"))).rejects.toMatchObject({ status: 502, retryable: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("reports a missing variant as Printful's error, not as success", async () => {
+    const { impl } = fakeFetch([{ status: 400, body: { code: 400, result: "Item 0: Invalid variant_id", error: { message: "Item 0: Invalid variant_id" } } }]);
+    await expect(printfulAdapter(impl).submit(input("live", "999999"))).rejects.toMatchObject({ status: 400, retryable: false, message: expect.stringContaining("Invalid variant_id") });
+  });
+
+  it("refuses a create answer without an order id", async () => {
+    const { impl } = fakeFetch([{ status: 200, body: { result: {} } }]);
+    await expect(printfulAdapter(impl).submit(input("live", "11050"))).rejects.toThrow(/did not return an order id/);
+  });
+
+  it("checks the token read-only and explains a rejected one", async () => {
+    const ok = fakeFetch([{ status: 200, body: { result: [{ id: 18975889, name: "Celebra Momentos Store" }] } }]);
+    await expect(checkPrintfulApi(ok.impl)).resolves.toEqual({ state: "connected", detail: "Printful API is authenticated (store “Celebra Momentos Store”)" });
+    expect(ok.calls[0].url).toBe("https://api.printful.com/stores");
+    expect(ok.calls[0].init.method ?? "GET").toBe("GET");
+    const rejected = fakeFetch([{ status: 401, body: { error: { message: "The access token provided is invalid." } } }]);
+    await expect(checkPrintfulApi(rejected.impl)).resolves.toMatchObject({ state: "unavailable", detail: expect.stringContaining("rejected the API token (HTTP 401)") });
+  });
+
+  it("asks for PRINTFUL_STORE_ID when an account-wide token sees several stores, and checks a configured one", async () => {
+    delete process.env.PRINTFUL_STORE_ID;
+    const several = fakeFetch([{ status: 200, body: { result: [{ id: 1, name: "A" }, { id: 2, name: "B" }] } }]);
+    await expect(checkPrintfulApi(several.impl)).resolves.toMatchObject({ state: "unavailable", detail: expect.stringContaining("PRINTFUL_STORE_ID") });
+    process.env.PRINTFUL_STORE_ID = "3";
+    const wrong = fakeFetch([{ status: 200, body: { result: [{ id: 1, name: "A" }] } }]);
+    await expect(checkPrintfulApi(wrong.impl)).resolves.toMatchObject({ state: "unavailable", detail: expect.stringContaining("is not a store") });
+    delete process.env.PRINTFUL_PRIVATE_TOKEN;
+    const none = vi.fn();
+    await expect(checkPrintfulApi(none)).resolves.toMatchObject({ state: "not_configured" });
+    expect(none).not.toHaveBeenCalled();
   });
 });

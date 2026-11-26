@@ -16,7 +16,9 @@ type GelatoOrder = {
   financialStatus?: string;
   shippedAt?: string | null;
   expectedDispatchDate?: string | null;
-  items?: { id?: string; itemReferenceId?: string; fulfillmentStatus?: string; fulfillments?: GelatoFulfillment[] | null }[];
+  // Why Gelato refused the order / an item (e.g. "Can't process print file item #… - PDFToolBox failed: …").
+  refusalReason?: string | null;
+  items?: { id?: string; itemReferenceId?: string; fulfillmentStatus?: string; refusalReason?: string | null; fulfillments?: GelatoFulfillment[] | null }[];
   shipment?: { id?: string; shipmentMethodName?: string | null; minDeliveryDate?: string | null; maxDeliveryDate?: string | null; fulfillmentCountry?: string | null; packages?: GelatoPackage[] | null } | null;
 };
 
@@ -102,16 +104,30 @@ export function gelatoTracking(order: GelatoOrder): TrackingInfo {
   return { shipments, estimatedDelivery: window, expectedDispatch: isoDate(order.expectedDispatchDate) };
 }
 
+// Gelato's refusal reasons (order and items), most detailed first, without repeats. The item reason usually
+// carries the preflight detail ("… Issue presents on pages: 1"), the order one repeats its first line.
+export function gelatoRefusal(order: GelatoOrder) {
+  const reasons = [order.refusalReason, ...(order.items || []).map((item) => item.refusalReason)]
+    .flatMap((value) => (typeof value === "string" ? value.split("\n") : []))
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const kept: string[] = [];
+  for (const reason of reasons) if (!kept.some((known) => known.includes(reason))) kept.push(reason);
+  return kept.join(" · ").slice(0, 600) || null;
+}
+
 export function parseGelatoOrder(order: GelatoOrder): ProviderOrderState {
   const raw = (order.fulfillmentStatus || order.orderType || "created").toLowerCase();
   const status = STATUS.find(([pattern]) => pattern.test(raw))?.[1] ?? "SUBMITTED";
   const tracking = gelatoTracking(order);
   const main = primaryShipment(tracking);
+  const refusal = gelatoRefusal(order);
   return {
     providerOrderId: order.id,
     providerStatus: raw,
     status,
-    problem: PROBLEM[raw] ?? null,
+    problem: PROBLEM[raw] && refusal ? `${PROBLEM[raw].replace(/: open it in the Gelato dashboard to see why$/, "")}: ${refusal}` : PROBLEM[raw] ?? (refusal && status === "CANCELLED" ? `Gelato's reason: ${refusal}` : null),
     carrier: main?.carrier || order.shipment?.shipmentMethodName || null,
     trackingNumber: main?.trackingNumber || null,
     trackingUrl: main?.trackingUrl || null,
