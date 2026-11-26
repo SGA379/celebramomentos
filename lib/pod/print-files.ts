@@ -4,7 +4,7 @@
 import { cloudinaryObjectKey, uploadFileToCloudinary, uploadRemoteImageToCloudinary } from "@/lib/server/cloudinary";
 import { prisma } from "@/lib/server/prisma";
 import { compositeFileUrl, isCloudinaryUrl, printFileUrl, type PrintSpec } from "./artwork";
-import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_MAX_BYTES, CALENDAR_PAGES, CALENDAR_PDF_VERSION, validateCalendarPdf, type Box, type CalendarLanguage } from "./calendar-pdf";
+import { buildCalendarPdf, calendarLayout, CALENDAR_MAX_BYTES, CALENDAR_MAX_DPI, CALENDAR_MIN_DPI, CALENDAR_PAGES, CALENDAR_PDF_VERSION, validateCalendarPdf, type Box, type CalendarLanguage } from "./calendar-pdf";
 
 export type StoredFile = { url: string; width: number; height: number };
 export type UploadedFile = { width: number; height: number; mimeType: string; kind: string };
@@ -86,8 +86,16 @@ function calendarMaxBytes() {
 // cs_srgb: Cloudinary converts the photo to sRGB (phone photos are often Display P3, some carry
 // non-standard compact profiles); the PDF then embeds it as plain RGB without the profile
 // (lib/pod/calendar-pdf.ts stripJpegMetadata), so the colours print as the customer saw them.
+// Pixel size of a photo box for the print file. Gelato wants 150–300 dpi at actual size: rounding to the
+// nearest pixel can land a hair above 300 dpi (e.g. 300.04), so the top profile rounds down and the lowest
+// one up. (boxPixels, rounding to nearest, stays what the studio recommends.)
+export function calendarPrintPixels(box: Box, dpi: number) {
+  const round = dpi >= CALENDAR_MAX_DPI ? Math.floor : dpi <= CALENDAR_MIN_DPI ? Math.ceil : Math.round;
+  return { width: round((box.width / 25.4) * dpi), height: round((box.height / 25.4) * dpi) };
+}
+
 export function calendarPhotoUrl(url: string, box: Box, profile: { dpi: number; quality: number }) {
-  const { width, height } = boxPixels(box, profile.dpi);
+  const { width, height } = calendarPrintPixels(box, profile.dpi);
   const source = url.match(/^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(.+)$/);
   if (!source) throw new Error("A calendar photo is not an upload from this shop");
   return `${source[1]}c_fill,g_center,w_${width},h_${height},q_${profile.quality},f_jpg,cs_srgb/${source[2]}`;

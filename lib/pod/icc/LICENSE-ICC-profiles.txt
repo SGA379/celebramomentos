@@ -1,0 +1,20 @@
+ICC profiles used by the calendar print file (lib/pod/calendar-pdf.ts, lib/pod/pdf-preflight.ts).
+Both are shipped unmodified and embedded unmodified in the generated PDFs.
+
+GRACoL2006_Coated1v2.icc
+  Source: ICC profile registry, https://www.color.org/registry/GRACoL2006_Coated1v2.xalter
+  (printing condition: ISO 12647-2:2004 sheetfed offset, grade 1 paper; characterization data CGATS TR006).
+  Copyright tag: "Copyright X-Rite, Inc.. This profile is made available by IDEAlliance, with permission of
+  X-Rite, Inc., and may be used, embedded, exchanged, and shared without restriction. It may not be altered,
+  or sold without written permission of IDEAlliance."
+  Used as the PDF/X-4 output intent requested by Gelato
+  (https://support.gelato.com/en/articles/8996349-what-are-the-design-requirements-for-pdf-uploads).
+
+sRGB2014.icc
+  Source: ICC sRGB profiles, https://registry.color.org/rgb-registry/srgbprofiles
+  Copyright tag: "Copyright International Color Consortium, 2015".
+  License (https://registry.color.org/profile-library/#license): "This profile is made available by the
+  International Color Consortium, and may be copied, distributed, embedded, made, used, and sold without
+  restriction. Altered versions of this profile shall have the original identification and copyright
+  information removed and shall not be misrepresented as the original profile."
+  Used as the source colour space of the photos and the design colours (ICCBased / DefaultRGB).
