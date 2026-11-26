@@ -4,7 +4,7 @@
 import { cloudinaryObjectKey, uploadFileToCloudinary, uploadRemoteImageToCloudinary } from "@/lib/server/cloudinary";
 import { prisma } from "@/lib/server/prisma";
 import { compositeFileUrl, isCloudinaryUrl, printFileUrl, type PrintSpec } from "./artwork";
-import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_MAX_BYTES, CALENDAR_PAGES, validateCalendarPdf, type Box, type CalendarLanguage } from "./calendar-pdf";
+import { boxPixels, buildCalendarPdf, calendarLayout, CALENDAR_MAX_BYTES, CALENDAR_PAGES, CALENDAR_PDF_VERSION, validateCalendarPdf, type Box, type CalendarLanguage } from "./calendar-pdf";
 
 export type StoredFile = { url: string; width: number; height: number };
 export type UploadedFile = { width: number; height: number; mimeType: string; kind: string };
@@ -83,11 +83,18 @@ function calendarMaxBytes() {
   return Number.isInteger(configured) && configured >= 1_000_000 ? configured : CALENDAR_MAX_BYTES;
 }
 
-async function boxPhoto(url: string, box: Box, profile: { dpi: number; quality: number }) {
+// cs_srgb: Cloudinary converts the photo to sRGB (phone photos are often Display P3, some carry
+// non-standard compact profiles); the PDF then embeds it as plain RGB without the profile
+// (lib/pod/calendar-pdf.ts stripJpegMetadata), so the colours print as the customer saw them.
+export function calendarPhotoUrl(url: string, box: Box, profile: { dpi: number; quality: number }) {
   const { width, height } = boxPixels(box, profile.dpi);
   const source = url.match(/^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(.+)$/);
   if (!source) throw new Error("A calendar photo is not an upload from this shop");
-  const response = await fetch(`${source[1]}c_fill,g_center,w_${width},h_${height},q_${profile.quality},f_jpg/${source[2]}`, { cache: "no-store", signal: AbortSignal.timeout(45_000) });
+  return `${source[1]}c_fill,g_center,w_${width},h_${height},q_${profile.quality},f_jpg,cs_srgb/${source[2]}`;
+}
+
+async function boxPhoto(url: string, box: Box, profile: { dpi: number; quality: number }) {
+  const response = await fetch(calendarPhotoUrl(url, box, profile), { cache: "no-store", signal: AbortSignal.timeout(45_000) });
   if (!response.ok) throw new Error(`A calendar photo could not be read (HTTP ${response.status})`);
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -144,7 +151,7 @@ export async function renderCalendarFile(input: { orderId: string; itemId: strin
     mimeType: "application/pdf",
     sizeBytes: uploaded.bytes || bytes.byteLength,
     originalName: name,
-    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pages: CALENDAR_PAGES, pageMm: input.pageMm, pdfPageMm: selected.validation.pageMm, bleedMm: selected.validation.bleedMm, dpi: selected.dpi, quality: selected.quality, optimizationAttempts: selected.attempt, bytes: bytes.byteLength, maxBytes, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length, coverPhoto: Boolean(input.cover && isCloudinaryUrl(input.cover)) },
+    metadata: { provider: "cloudinary", resourceType: "raw", publicId: uploaded.publicId, version: uploaded.version, pdfVersion: CALENDAR_PDF_VERSION, pages: CALENDAR_PAGES, pageMm: input.pageMm, pdfPageMm: selected.validation.pageMm, bleedMm: selected.validation.bleedMm, dpi: selected.dpi, quality: selected.quality, optimizationAttempts: selected.attempt, bytes: bytes.byteLength, maxBytes, role: "print_file", orderItemId: input.itemId, photos: usable.filter(Boolean).length, coverPhoto: Boolean(input.cover && isCloudinaryUrl(input.cover)) },
   };
   await prisma.asset.upsert({ where: { objectKey }, create: { objectKey, ...data }, update: data });
   return { url: uploaded.secureUrl, pages: CALENDAR_PAGES, bytes: data.sizeBytes, pageMm: selected.validation.pageMm, bleedMm: selected.validation.bleedMm, dpi: selected.dpi, quality: selected.quality, optimizationAttempts: selected.attempt };
