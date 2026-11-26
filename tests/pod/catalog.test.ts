@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { gelatoPhoneModel, gelatoPosterFormat, mapOrderItem, mugColorKey, studioPhotoTarget, unavailableCombination, type ItemContext } from "@/lib/pod/catalog";
+import { gelatoPhoneModel, gelatoPosterFormat, mapOrderItem, mugColorKey, studioPhotoTarget, unavailableCombination, type ItemContext, wallArtPosterPaper } from "@/lib/pod/catalog";
 import { photoEnlargement } from "@/lib/print-quality";
-import { GELATO_POSTER_HANGER_UIDS, GELATO_TOUGH_CASE_UIDS } from "@/lib/pod/gelato-catalog";
+import { GELATO_CLASSIC_POSTER_HANGER_UIDS, GELATO_MUSEUM_POSTER_HANGER_UIDS, GELATO_POSTER_HANGER_UIDS, GELATO_TOUGH_CASE_UIDS, WALL_ART_POSTER_PAPER } from "@/lib/pod/gelato-catalog";
 
 const ctx = (overrides: Partial<ItemContext>): ItemContext => ({ kind: "WALL_ART", provider: "GELATO", productName: "Póster", variantName: null, podSku: null, options: {}, photoCount: 1, cardSize: null, cardSku: null, ...overrides });
 
@@ -155,5 +155,56 @@ describe("admin override", () => {
   it("lets a size's Print shop SKU replace the built-in mapping", () => {
     expect(mapOrderItem(ctx({ kind: "PHONE_CASE", provider: "PRINTEERS", podSku: "Product_override", printeers: { productReference: "Product_chosen", printMm: { width: 70, height: 150 }, crop: null } })).units[0].productRef).toBe("Product_override");
     expect(mapOrderItem(ctx({ variantName: "21 x 21.97 cm", podSku: "custom_uid" })).units[0].productRef).toBe("custom_uid");
+  });
+});
+
+// Client request 2026-11-26 (Sonia): Wall Art moves from the museum-quality matte paper (250 gsm archival) to the
+// Classic Matte Paper (170 gsm) Poster+Hanger product. Gelato catalog and prices checked that day.
+describe("Wall Art: classic matte paper poster with hanger", () => {
+  // Every size on sale in the shop (Admin → Products, 2026-11-26).
+  const SIZES = ["20 x 25 cm", "25 x 25 cm", "25 x 60 cm", "27 x 35 cm", "28 x 43 cm", "A3 (29.7 x 42 cm)", "30 x 30 cm", "30 x 40 cm", "30 x 45 cm", "35 x 35 cm", "40 x 40 cm", "40 x 60 cm", "A2 (42 x 59.4 cm)", "45 x 45 cm", "50 x 50 cm", "50 x 70 cm", "60 x 80 cm", "60 x 90 cm", "70 x 70 cm", "70 x 100 cm", "75 x 100 cm", "A1 (59.4 x 84.1 cm)", "A0 (84.1 x 118.9 cm)"];
+  const HANGERS = ["Madera natural", "Madera oscura", "Blanco", "Negro"];
+
+  it("sends new orders as the classic matte paper product", () => {
+    expect(WALL_ART_POSTER_PAPER).toBe("classic");
+    const ref = mapOrderItem(ctx({ variantName: "30 x 40 cm", options: { orientacion: "Vertical", colgador: "Madera natural" } })).units[0].productRef;
+    expect(ref).toBe("wall_hanging_poster_310-mm_natural-wood_wood_w14xt20-mm_300x400-mm-12x16-inch_170-gsm-65lb-uncoated_4-0_ver");
+    expect(GELATO_POSTER_HANGER_UIDS).toBe(GELATO_CLASSIC_POSTER_HANGER_UIDS);
+  });
+
+  it("offers every size, orientation and hanger exactly as before, with the same print file requirements", () => {
+    let combos = 0;
+    for (const size of SIZES) for (const orientation of ["Vertical", "Horizontal"]) for (const hanger of HANGERS) {
+      const options = { orientacion: orientation, colgador: hanger };
+      const classic = mapOrderItem(ctx({ variantName: size, options }));
+      const museum = mapOrderItem(ctx({ variantName: size, options, posterPaper: "museum" }));
+      // Same availability (A1 / A0 exist in one orientation only, as before).
+      expect(classic.issues.map((issue) => issue.code)).toEqual(museum.issues.map((issue) => issue.code));
+      if (classic.issues.length) continue;
+      combos += 1;
+      expect(classic.units[0].productRef).toMatch(/_170-gsm-65lb-uncoated_/);
+      expect(classic.units[0].productRef).toBe(museum.units[0].productRef!.replace("_250-gsm-100lb-uncoated-offwhite-archival_", "_170-gsm-65lb-uncoated_"));
+      expect(classic.units[0].specs).toEqual(museum.units[0].specs);
+    }
+    expect(combos).toBe(21 * 8 + 2 * 4);
+  });
+
+  it("has a classic product for every museum-quality one, differing only in the paper", () => {
+    expect(Object.keys(GELATO_CLASSIC_POSTER_HANGER_UIDS).sort()).toEqual(Object.keys(GELATO_MUSEUM_POSTER_HANGER_UIDS).sort());
+    for (const [key, uid] of Object.entries(GELATO_MUSEUM_POSTER_HANGER_UIDS)) expect(GELATO_CLASSIC_POSTER_HANGER_UIDS[key]).toBe(uid.replace("_250-gsm-100lb-uncoated-offwhite-archival_", "_170-gsm-65lb-uncoated_"));
+  });
+
+  it("keeps the museum-quality paper for items bought and planned with it (e.g. when a print order is resent)", () => {
+    // The poster of the paid order CM-1795608595030 (its print order failed with the calendar and may be resent).
+    const bought = "wall_hanging_poster_290-mm_dark-wood_wood_w14xt20-mm_250x250-mm-10x10-inch_250-gsm-100lb-uncoated-offwhite-archival_4-0_ver";
+    expect(wallArtPosterPaper(bought)).toBe("museum");
+    expect(wallArtPosterPaper(null)).toBe("classic");
+    expect(wallArtPosterPaper("wall_hanging_poster_290-mm_dark-wood_wood_w14xt20-mm_250x250-mm-10x10-inch_170-gsm-65lb-uncoated_4-0_ver")).toBe("classic");
+    const replanned = mapOrderItem(ctx({ variantName: "25 x 25 cm", options: { colgador: "Madera oscura", orientacion: "Vertical" }, posterPaper: wallArtPosterPaper(bought) }));
+    expect(replanned.units[0].productRef).toBe(bought);
+  });
+
+  it("still lets an admin print shop SKU override the mapping", () => {
+    expect(mapOrderItem(ctx({ variantName: "30 x 40 cm", podSku: "wall_hanging_poster_custom" })).units[0].productRef).toBe("wall_hanging_poster_custom");
   });
 });

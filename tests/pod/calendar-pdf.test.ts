@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFRef, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { boxPixels, buildCalendarPdf, calendarLayout, calendarPdfPage, calendarPreflight, CALENDAR_BLEED_MM, CALENDAR_FONT_FILES, CALENDAR_PAGES, CALENDAR_PDF_VERSION, monthGrid, monthName, stripJpegMetadata, validateCalendarPdf } from "@/lib/pod/calendar-pdf";
-import { formatPreflightReport, iccProfiles, readIccProfile, withPdfVersion16, type PreflightCheck } from "@/lib/pod/pdf-preflight";
+import { formatPreflightReport, iccProfiles, parseToUnicode, readIccProfile, trueTypeGlyphs, withPdfVersion16, type PreflightCheck } from "@/lib/pod/pdf-preflight";
 
 // print-files.ts (calendarPrintPixels) imports the database client and image storage; neither is used here.
 vi.mock("@/lib/server/prisma", () => ({ prisma: {} }));
@@ -120,9 +120,9 @@ async function changed(edit: (pdf: PDFDocument) => void | Promise<void>) {
 describe("calendar PDF: Gelato's PDF requirements (PDF/X-4, GRACoL 2006)", () => {
   it("passes every requirement: the report for a full A5 calendar", async () => {
     const bytes = await buildCalendarPdf({ page: A5, year: 2027, language: "pt", monthPhotos: Array(12).fill(withIcc(month)), coverPhoto: withIcc(cover) });
-    const { checks } = await calendarPreflight(bytes, A5);
+    const { checks } = await calendarPreflight(bytes, A5, undefined, { year: 2027, language: "pt" });
     expect(checks.filter((check) => check.status !== "PASS"), formatPreflightReport(checks)).toEqual([]);
-    expect(checks.map((check) => check.id)).toEqual(["pdf", "no-password", "pdfx-version-header", "pdfx-identification", "pdfx-metadata", "output-intent", "structure", "no-interactive", "no-layers", "page-count", "page-size", "bleed-box", "trim-box", "safe-area", "image-resolution", "fonts-embedded", "font-names", "font-size", "colour", "no-transparency", "file-size"]);
+    expect(checks.map((check) => check.id)).toEqual(["pdf", "no-password", "pdfx-version-header", "pdfx-identification", "pdfx-metadata", "output-intent", "structure", "no-interactive", "no-layers", "page-count", "page-size", "bleed-box", "trim-box", "safe-area", "image-resolution", "fonts-embedded", "font-names", "font-size", "colour", "no-transparency", "glyphs", "page-order", "pdfx-graphics-state", "file-size"]);
     await expect(validateCalendarPdf(bytes, A5)).resolves.toMatchObject({ pages: 14, fonts: 3, images: 13 });
   });
 
@@ -274,8 +274,14 @@ describe("calendar PDF: Gelato's PDF requirements (PDF/X-4, GRACoL 2006)", () =>
     // The wire binding at the top needs 12 mm.
     const top = await changed((pdf) => { const page = pdf.getPages()[2]; page.drawRectangle({ x: 200, y: page.getHeight() - 14 * PT, width: 10, height: 2, color: rgb(0, 0, 0) }); });
     expect(failed(top.checks)).toEqual(["safe-area"]);
-    const unmanaged = await changed((pdf) => { for (const page of pdf.getPages()) page.node.Resources()!.delete(PDFName.of("ColorSpace")); });
+    // Device RGB drawn without a DefaultRGB colour space: unmanaged colour.
+    const unmanaged = await changed((pdf) => { const page = pdf.getPages()[5]; page.node.Resources()!.lookup(PDFName.of("ColorSpace"), PDFDict).delete(PDFName.of("DefaultRGB")); page.drawRectangle({ x: 200, y: 200, width: 10, height: 10, color: rgb(0.2, 0.2, 0.2) }); });
     expect(failed(unmanaged.checks)).toEqual(["colour"]);
+    expect(unmanaged.checks.find((check) => check.id === "colour")?.detail).toMatch(/device RGB colours without a DefaultRGB/);
+    // The ICC colour space the content names is gone: a broken file.
+    const undefinedSpace = await changed((pdf) => { for (const page of pdf.getPages()) page.node.Resources()!.delete(PDFName.of("ColorSpace")); });
+    expect(failed(undefinedSpace.checks)).toEqual(["colour"]);
+    expect(undefinedSpace.checks.find((check) => check.id === "colour")?.detail).toMatch(/undefined colour spaces \(\/CSsRGB\)/);
   });
 
   it("fails encryption, a wrong page count, and a file that is not a PDF", async () => {
@@ -290,12 +296,40 @@ describe("calendar PDF: Gelato's PDF requirements (PDF/X-4, GRACoL 2006)", () =>
     await expect(validateCalendarPdf(good, { width: 156, height: 218 })).rejects.toThrow(/expected 164 × 226 mm/);
   });
 
-  it("reports an oversized file as a size problem, not counting the fixed output intent profile", async () => {
+  it("counts the whole file, output intent profile included, against the storage upload limit", async () => {
     const bytes = await buildCalendarPdf({ page: A5, year: 2027, language: "es", monthPhotos: Array(12).fill(month), coverPhoto: cover });
-    const { checks, outputIntentBytes } = await calendarPreflight(bytes, A5, bytes.byteLength - 1);
-    expect(outputIntentBytes).toBeGreaterThan(2_000_000);
-    expect(status(checks, "file-size")).toBe("PASS");
-    await expect(validateCalendarPdf(bytes, A5, bytes.byteLength - outputIntentBytes - 1)).rejects.toThrow(/allows at most/);
+    const atLimit = await calendarPreflight(bytes, A5, bytes.byteLength);
+    expect(status(atLimit.checks, "file-size")).toBe("PASS");
+    expect(atLimit.outputIntentBytes).toBeGreaterThan(2_000_000);
+    const over = await calendarPreflight(bytes, A5, bytes.byteLength - 1);
+    expect(failed(over.checks)).toEqual(["file-size"]);
+    await expect(validateCalendarPdf(bytes, A5, bytes.byteLength - 1)).rejects.toThrow(/allows at most/);
+  });
+
+  it("checks the page order and the decoded text of every page", async () => {
+    const bytes = await buildCalendarPdf({ page: A5, year: 2027, language: "pt", monthPhotos: Array(12).fill(null), coverPhoto: null });
+    const right = await calendarPreflight(bytes, A5, undefined, { year: 2027, language: "pt" });
+    expect(status(right.checks, "page-order")).toBe("PASS");
+    expect(status(right.checks, "glyphs")).toBe("PASS");
+    // A calendar for another year.
+    const otherYear = await calendarPreflight(bytes, A5, undefined, { year: 2028, language: "pt" });
+    expect(status(otherYear.checks, "page-order")).toBe("FAIL");
+    // February and March swapped.
+    const reordered = await PDFDocument.load(bytes);
+    const [march] = await reordered.copyPages(reordered, [3]);
+    reordered.removePage(3);
+    reordered.insertPage(2, march);
+    const reorderedReport = await calendarPreflight(withPdfVersion16(await reordered.save({ useObjectStreams: false })), A5, undefined, { year: 2027, language: "pt" });
+    expect(reorderedReport.checks.find((check) => check.id === "page-order")).toMatchObject({ status: "FAIL", detail: expect.stringContaining("page 3 lacks “FEVEREIRO”") });
+  });
+
+  it("reads glyphs and ToUnicode maps like a RIP would", () => {
+    expect(parseToUnicode("1 beginbfchar\n<0003> <0041>\nendbfchar\n1 beginbfrange\n<0010> <0012> <0061>\nendbfrange")).toEqual(new Map([[3, "A"], [16, "a"], [17, "b"], [18, "c"]]));
+    const glyphs = trueTypeGlyphs(new Uint8Array(readFileSync(`lib/pod/fonts/${CALENDAR_FONT_FILES.sans}`)));
+    expect(glyphs!.count).toBeGreaterThan(2000);
+    // The space glyph has no outline; letters do.
+    expect(glyphs!.empty.has(3)).toBe(true);
+    expect(glyphs!.empty.has(36)).toBe(false);
   });
 
   it("is versioned so files from the generators Gelato could not preflight are made again", () => {

@@ -16,7 +16,7 @@
 import { createHash, randomUUID } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
-import { decodePDFRawStream, PDFArray, PDFDict, PDFDocument, PDFHeader, PDFHexString, PDFName, PDFNumber, PDFRawStream, PDFRef, PDFString, type PDFObject } from "pdf-lib";
+import { decodePDFRawStream, PDFArray, PDFContentStream, PDFDict, PDFDocument, PDFHeader, PDFHexString, PDFName, PDFNumber, PDFOperator, PDFRawStream, PDFRef, PDFString, type PDFObject } from "pdf-lib";
 
 const PT = 72 / 25.4;
 
@@ -74,6 +74,25 @@ export function readIccProfile(bytes: Uint8Array): { ok: true; header: IccHeader
 
 const xmlEscape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+// The name of the ICC-based sRGB colour space in every page's resources.
+const SRGB_SPACE = "CSsRGB";
+
+// Rewrites a content stream's device RGB colour operators to the ICC-based sRGB space. pdf-lib keeps a
+// stream's operators in memory until it is saved; its PDFOperator exposes name and args at run time.
+function manageDeviceRgb(stream: PDFContentStream) {
+  const list = (stream as unknown as { operators: PDFOperator[] }).operators;
+  if (!Array.isArray(list)) throw new Error("pdf-lib content stream layout changed: cannot colour-manage the design colours");
+  const next: PDFOperator[] = [];
+  for (const operator of list) {
+    const { name, args } = operator as unknown as { name: string; args: PDFNumber[] };
+    if (name === "rg" || name === "RG") {
+      next.push(PDFOperator.of((name === "rg" ? "cs" : "CS") as never, [PDFName.of(SRGB_SPACE)]));
+      next.push(PDFOperator.of((name === "rg" ? "sc" : "SC") as never, args));
+    } else next.push(operator);
+  }
+  list.splice(0, list.length, ...next);
+}
+
 // Call after everything is drawn and `await pdf.flush()` (so the images and fonts exist), before save();
 // pass the saved bytes through withPdfVersion16.
 // `images`: the embedded images (all RGB JPEGs, already converted to sRGB by the caller).
@@ -84,7 +103,10 @@ export function applyPdfX4(pdf: PDFDocument, options: { title: string; creator: 
   // (pdf-lib's writer ignores this; withPdfVersion16 sets the header after saving.)
   context.header = PDFHeader.forVersion(1, 6);
 
-  // sRGB as the ICC colour space of the photos and, through DefaultRGB, of every rg / RG design colour.
+  // sRGB (ICCBased) as the colour space of the photos and of every design colour: pdf-lib writes design
+  // colours as device RGB ("r g b rg" / "RG"); they are rewritten to "/CSsRGB cs r g b sc" (and CS / SC),
+  // the same values in the ICC-based sRGB space, so no device-dependent colour is left. DefaultRGB maps any
+  // device RGB to the same profile as a safety net. The numbers do not change, so neither does the design.
   const rgbProfile = context.register(context.flateStream(rgb, { N: 3 }));
   const rgbSpace = context.register(context.obj([PDFName.of("ICCBased"), rgbProfile]));
   for (const ref of options.images) {
@@ -95,8 +117,13 @@ export function applyPdfX4(pdf: PDFDocument, options: { title: string; creator: 
     const resources = page.node.Resources();
     if (!resources) throw new Error("A page has no resources");
     const spaces = resources.lookup(PDFName.of("ColorSpace"));
-    if (spaces instanceof PDFDict) spaces.set(PDFName.of("DefaultRGB"), rgbSpace);
-    else resources.set(PDFName.of("ColorSpace"), context.obj({ DefaultRGB: rgbSpace }));
+    if (spaces instanceof PDFDict) { spaces.set(PDFName.of("DefaultRGB"), rgbSpace); spaces.set(PDFName.of(SRGB_SPACE), rgbSpace); }
+    else resources.set(PDFName.of("ColorSpace"), context.obj({ DefaultRGB: rgbSpace, [SRGB_SPACE]: rgbSpace }));
+    const contents = page.node.Contents();
+    for (const ref of contents instanceof PDFArray ? contents.asArray() : contents ? [contents] : []) {
+      const stream = ref instanceof PDFRef ? context.lookup(ref) : ref;
+      if (stream instanceof PDFContentStream) manageDeviceRgb(stream);
+    }
   }
 
   // Subset fonts: ISO 32000 (9.6.4) wants their names to start with a six-letter tag and "+"; pdf-lib names
@@ -213,8 +240,12 @@ export type PreflightOptions = {
   maxDpi: number;
   // Recommended minimum text size (a WARN below it, not a FAIL).
   minFontPt: number;
-  // Our own size budget for the file without its (fixed) output intent profile; Gelato sets no limit.
+  // Largest file the pipeline can store and hand to the print shop: the image storage's per-file upload limit
+  // (Cloudinary Free plan: 10 MiB for raw files). Gelato itself sets no maximum. The whole file counts.
   maxBytes: number;
+  // Text each page must contain, in page order (e.g. the month names): checks page order and that the text
+  // decodes to what was meant (no wrong glyphs).
+  pageText?: string[][];
 };
 
 type Matrix = [number, number, number, number, number, number];
@@ -228,7 +259,46 @@ const boundsOf = (points: [number, number][]): Bounds => ({ minX: Math.min(...po
 // Content stream tokens: hex strings, literal strings, names, array brackets, numbers and operators.
 const TOKEN = /<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\)|\/[^\s/[\]()<>{}%]+|\[|\]|[^\s/[\]()<>{}%]+/g;
 
-type FontMetrics = { twoByte: boolean; widths: Map<number, number>; defaultWidth: number; ascent: number; descent: number };
+// toUnicode: code → text (ToUnicode CMap); glyphs: for an embedded TrueType program, the number of glyphs and
+// which glyph ids have no outline (codes are glyph ids: pdf-lib's CIDFontType2 fonts use CIDToGIDMap Identity).
+type FontMetrics = { name: string; twoByte: boolean; widths: Map<number, number>; defaultWidth: number; ascent: number; descent: number; toUnicode: Map<number, string> | null; glyphs: { count: number; empty: Set<number> } | null };
+
+const utf16 = (hex: string) => { let out = ""; for (let index = 0; index + 4 <= hex.length; index += 4) out += String.fromCharCode(parseInt(hex.slice(index, index + 4), 16)); return out; };
+
+// bfchar ("<code> <text>") and bfrange ("<from> <to> <text>" or "<from> <to> [<text> …]") entries of a ToUnicode CMap.
+export function parseToUnicode(cmap: string) {
+  const map = new Map<number, string>();
+  for (const block of cmap.match(/beginbfchar([\s\S]*?)endbfchar/g) || []) for (const [, code, value] of block.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>/g)) map.set(parseInt(code, 16), utf16(value));
+  for (const block of cmap.match(/beginbfrange([\s\S]*?)endbfrange/g) || []) {
+    for (const [, from, to, rest] of block.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])/g)) {
+      const start = parseInt(from, 16);
+      const end = parseInt(to, 16);
+      if (rest.startsWith("[")) [...rest.matchAll(/<([0-9A-Fa-f]*)>/g)].forEach(([, value], offset) => map.set(start + offset, utf16(value)));
+      else { const base = utf16(rest.slice(1, -1)); for (let code = start; code <= end; code += 1) map.set(code, base.slice(0, -1) + String.fromCharCode(base.charCodeAt(base.length - 1) + code - start)); }
+    }
+  }
+  return map;
+}
+
+// Number of glyphs ('maxp') and the glyph ids with no outline ('loca'), from a TrueType font program.
+export function trueTypeGlyphs(font: Uint8Array) {
+  const view = new DataView(font.buffer, font.byteOffset, font.byteLength);
+  const tables = new Map<string, number>();
+  for (let index = 0; index < view.getUint16(4); index += 1) {
+    const at = 12 + index * 16;
+    tables.set(String.fromCharCode(...font.subarray(at, at + 4)), view.getUint32(at + 8));
+  }
+  const maxp = tables.get("maxp");
+  const head = tables.get("head");
+  const loca = tables.get("loca");
+  if (maxp === undefined || head === undefined || loca === undefined) return null;
+  const count = view.getUint16(maxp + 4);
+  const long = view.getInt16(head + 50) === 1;
+  const offset = (glyph: number) => (long ? view.getUint32(loca + glyph * 4) : view.getUint16(loca + glyph * 2) * 2);
+  const empty = new Set<number>();
+  for (let glyph = 0; glyph < count; glyph += 1) if (offset(glyph + 1) === offset(glyph)) empty.add(glyph);
+  return { count, empty };
+}
 
 function fontMetrics(pdf: PDFDocument, font: PDFDict): FontMetrics {
   const num = (value: PDFObject | undefined, fallback: number) => (value instanceof PDFNumber ? value.asNumber() : fallback);
@@ -238,6 +308,12 @@ function fontMetrics(pdf: PDFDocument, font: PDFDict): FontMetrics {
   const ascent = descriptor instanceof PDFDict ? num(descriptor.lookup(PDFName.of("Ascent")), 800) : 800;
   const descent = descriptor instanceof PDFDict ? num(descriptor.lookup(PDFName.of("Descent")), -200) : -200;
   const widths = new Map<number, number>();
+  const name = String(font.get(PDFName.of("BaseFont")) ?? "").slice(1);
+  const unicodeStream = font.lookup(PDFName.of("ToUnicode"));
+  const toUnicode = unicodeStream instanceof PDFRawStream ? parseToUnicode(new TextDecoder("latin1").decode(decodePDFRawStream(unicodeStream).decode())) : null;
+  const program = descriptor instanceof PDFDict ? descriptor.lookup(PDFName.of("FontFile2")) : null;
+  let glyphs: FontMetrics["glyphs"] = null;
+  if (program instanceof PDFRawStream) { try { glyphs = trueTypeGlyphs(decodePDFRawStream(program).decode()); } catch { glyphs = { count: 0, empty: new Set() }; } }
   if (descendants instanceof PDFArray) {
     // CID widths: [c [w1 w2 …]] or [c_first c_last w].
     const list = target.lookup(PDFName.of("W"));
@@ -248,12 +324,12 @@ function fontMetrics(pdf: PDFDocument, font: PDFDict): FontMetrics {
       if (next instanceof PDFArray) { next.asArray().forEach((width, offset) => widths.set(first + offset, (width as PDFNumber).asNumber())); index += 2; }
       else { const last = (next as PDFNumber).asNumber(); const width = (items[index + 2] as PDFNumber).asNumber(); for (let cid = first; cid <= last; cid += 1) widths.set(cid, width); index += 3; }
     }
-    return { twoByte: true, widths, defaultWidth: num(target.lookup(PDFName.of("DW")), 1000), ascent, descent };
+    return { name, twoByte: true, widths, defaultWidth: num(target.lookup(PDFName.of("DW")), 1000), ascent, descent, toUnicode, glyphs };
   }
   const firstChar = num(font.lookup(PDFName.of("FirstChar")), 0);
   const list = font.lookup(PDFName.of("Widths"));
   if (list instanceof PDFArray) list.asArray().forEach((width, offset) => widths.set(firstChar + offset, (pdf.context.lookup(width) as PDFNumber ?? width as PDFNumber).asNumber()));
-  return { twoByte: false, widths, defaultWidth: 500, ascent, descent };
+  return { name, twoByte: false, widths, defaultWidth: 500, ascent, descent, toUnicode, glyphs: null };
 }
 
 const stringCodes = (token: string, twoByte: boolean): number[] => {
@@ -264,7 +340,9 @@ const stringCodes = (token: string, twoByte: boolean): number[] => {
   return Array.from({ length: Math.floor(bytes.length / 2) }, (_, index) => (bytes[index * 2] << 8) | bytes[index * 2 + 1]);
 };
 
-type PageContent = { bounds: (Bounds & { kind: string })[]; images: { name: string; ppiX: number; ppiY: number; bounds: Bounds }[]; fontSizesPt: number[]; deviceRgb: boolean; spotColour: string | null; inlineImage: boolean; forms: number };
+// text: the page's text runs decoded through ToUnicode ("" for a code without a mapping), one per line.
+// missingGlyphs: shown codes that are .notdef, beyond the font's glyphs, or a visible character without outline.
+type PageContent = { bounds: (Bounds & { kind: string })[]; images: { name: string; ppiX: number; ppiY: number; bounds: Bounds }[]; fontSizesPt: number[]; deviceRgb: boolean; spotColour: string | null; inlineImage: boolean; forms: number; text: string[]; missingGlyphs: string[]; unmappedText: number; undefinedSpaces: string[] };
 
 // Interprets a page's content: where each image, path and text run lands (user space, points), the
 // images' effective resolution and the text sizes, and the colour operators used.
@@ -278,7 +356,7 @@ function readPageContent(pdf: PDFDocument, pageIndex: number): PageContent {
   const objects = resources?.lookup(PDFName.of("XObject"));
   const spaces = resources?.lookup(PDFName.of("ColorSpace"));
   const metrics = new Map<string, FontMetrics>();
-  const result: PageContent = { bounds: [], images: [], fontSizesPt: [], deviceRgb: false, spotColour: null, inlineImage: false, forms: 0 };
+  const result: PageContent = { bounds: [], images: [], fontSizesPt: [], deviceRgb: false, spotColour: null, inlineImage: false, forms: 0, text: [], missingGlyphs: [], unmappedText: 0, undefinedSpaces: [] };
   const stack: Matrix[] = [];
   let ctm: Matrix = IDENTITY;
   let tm: Matrix = IDENTITY;
@@ -297,10 +375,20 @@ function readPageContent(pdf: PDFDocument, pageIndex: number): PageContent {
     result.bounds.push({ kind: "text", ...boundsOf(corners) });
     result.fontSizesPt.push(fontSize * Math.hypot(m[0], m[1]));
     tm = multiply([1, 0, 0, 1, advance, 0], tm);
+    const chars = codes.map((code) => font!.toUnicode?.get(code) ?? null);
+    result.unmappedText += chars.filter((char) => char === null).length;
+    result.text.push(chars.map((char) => char ?? "").join(""));
+    codes.forEach((code, index) => {
+      const glyphs = font!.glyphs;
+      const visible = chars[index] !== null && /\S/.test(chars[index]!);
+      if (code === 0 || (glyphs && (code >= glyphs.count || (visible && glyphs.empty.has(code))))) result.missingGlyphs.push(`${font!.name} code ${code}${chars[index] ? ` (“${chars[index]}”)` : ""}`);
+    });
   };
   const colourSpace = (name: string) => {
     if (name === "/DeviceRGB") result.deviceRgb = true;
     const space = spaces instanceof PDFDict ? spaces.lookup(PDFName.of(name.slice(1))) : undefined;
+    // A named colour space the page does not define: the file is broken (a RIP stops on it).
+    if (!space && !["/DeviceRGB", "/DeviceCMYK", "/DeviceGray", "/Pattern"].includes(name) && !result.undefinedSpaces.includes(name)) result.undefinedSpaces.push(name);
     const family = space instanceof PDFArray ? String(space.get(0)) : space ? String(space) : name;
     if (family === "/Separation" || family === "/DeviceN") result.spotColour = name;
   };
@@ -552,6 +640,7 @@ export async function preflightPdf(bytes: Uint8Array, options: PreflightOptions)
     const managedRgb = defaultRgb !== undefined && checkIccSpace(defaultRgb, `page ${index + 1} DefaultRGB`);
     if (contents[index].deviceRgb && !managedRgb) colourProblems.push(`page ${index + 1} uses device RGB colours without a DefaultRGB ICC colour space`);
     if (contents[index].spotColour) colourProblems.push(`page ${index + 1} uses a spot colour (${contents[index].spotColour})`);
+    if (contents[index].undefinedSpaces.length) colourProblems.push(`page ${index + 1} uses undefined colour spaces (${contents[index].undefinedSpaces.join(", ")})`);
     if (contents[index].inlineImage) colourProblems.push(`page ${index + 1} has an inline image`);
     const objects = resources?.lookup(PDFName.of("XObject"));
     if (!(objects instanceof PDFDict)) return;
@@ -572,7 +661,7 @@ export async function preflightPdf(bytes: Uint8Array, options: PreflightOptions)
       }
     }
   });
-  add("colour", "Colour: sRGB/CMYK objects colour-managed (ICC-based), valid ICC profiles, no spot colours, no profiles hidden in JPEGs", colourProblems.length ? "FAIL" : "PASS", colourProblems.length ? `Calendar PDF colour: ${colourProblems.slice(0, 4).join("; ")}` : `${iccProfilesChecked} ICC colour space uses checked; design colours through DefaultRGB (sRGB2014)`);
+  add("colour", "Colour: sRGB/CMYK objects colour-managed (ICC-based), valid ICC profiles, no spot colours, no profiles hidden in JPEGs", colourProblems.length ? "FAIL" : "PASS", colourProblems.length ? `Calendar PDF colour: ${colourProblems.slice(0, 4).join("; ")}` : `${iccProfilesChecked} ICC colour space uses checked; ${contents.some((content) => content.deviceRgb) ? "device RGB design colours mapped to sRGB2014 through DefaultRGB" : "no device-dependent colour: design colours and photos are ICC-based sRGB2014"}`);
 
   // Transparency (Gelato: flatten it): soft masks, constant alpha below 1, blend modes, transparency groups.
   const transparency: string[] = [];
@@ -591,11 +680,37 @@ export async function preflightPdf(bytes: Uint8Array, options: PreflightOptions)
   if (/\/SMask\s*\d+\s+\d+\s+R/.test(raw)) transparency.push("an image with a soft mask");
   add("no-transparency", "Transparency flattened", transparency.length ? "FAIL" : "PASS", transparency.length ? `Calendar PDF has transparency: ${transparency.slice(0, 3).join(", ")}` : "No soft masks, alpha or blend modes");
 
+  // Glyphs: no .notdef, no code beyond the embedded font, no visible character without an outline, and all
+  // text mapped to Unicode (ToUnicode), so the shop's tools read the same text that prints.
+  const missing = contents.flatMap((content, index) => content.missingGlyphs.map((glyph) => `page ${index + 1}: ${glyph}`));
+  const unmapped = contents.reduce((sum, content) => sum + content.unmappedText, 0);
+  add("glyphs", "No missing glyphs; text encoded with a ToUnicode map", missing.length || unmapped ? "FAIL" : "PASS", missing.length ? `Calendar PDF has missing glyphs: ${missing.slice(0, 4).join("; ")}` : unmapped ? `Calendar PDF has ${unmapped} characters without a Unicode mapping` : `${contents.reduce((sum, content) => sum + content.text.join("").length, 0)} characters, every glyph present in its embedded font`);
+  if (options.pageText) {
+    const wrong = options.pageText.flatMap((expected, index) => {
+      const text = (contents[index]?.text || []).join(" ");
+      const absent = expected.filter((value) => !text.includes(value));
+      return absent.length ? [`page ${index + 1} lacks ${absent.map((value) => `“${value}”`).join(", ")}`] : [];
+    });
+    add("page-order", "Pages in order (cover, January … December, back)", wrong.length ? "FAIL" : "PASS", wrong.length ? `Calendar PDF pages out of order or text wrong: ${wrong.slice(0, 3).join("; ")}` : `${options.pageText.length} pages have their expected text in order`);
+  }
+  // PDF/X forbids transfer functions and halftones in the graphics state; no catalog /Version above 1.6.
+  const forbiddenState: string[] = [];
+  pages.forEach((page, index) => {
+    const states = page.node.Resources()?.lookup(PDFName.of("ExtGState"));
+    if (states instanceof PDFDict) for (const [name, ref] of states.entries()) {
+      const state = pdf.context.lookup(ref);
+      if (state instanceof PDFDict) for (const key of ["TR", "TR2", "HT", "HTP"]) if (state.get(PDFName.of(key)) && String(state.get(PDFName.of(key))) !== "/Default") forbiddenState.push(`page ${index + 1} ${name} ${key}`);
+    }
+  });
+  const catalogVersion = pdf.catalog.get(PDFName.of("Version"));
+  if (catalogVersion && !/^\/1\.[0-6]$/.test(String(catalogVersion))) forbiddenState.push(`catalog /Version ${catalogVersion}`);
+  add("pdfx-graphics-state", "PDF/X-4: no transfer functions, halftones or newer PDF version in the catalog", forbiddenState.length ? "FAIL" : "PASS", forbiddenState.length ? `Calendar PDF uses ${forbiddenState.slice(0, 3).join(", ")}` : "None present");
+
   const forms = contents.reduce((sum, content) => sum + content.forms, 0);
   if (forms) add("no-form-xobjects", "Content readable by this preflight (no nested form XObjects)", "WARN", `${forms} form XObjects were not inspected`);
 
-  const budget = bytes.byteLength - outputIntentBytes;
-  add("file-size", "File size within our budget (Gelato sets no maximum)", budget > options.maxBytes ? "FAIL" : "PASS", budget > options.maxBytes ? `Calendar PDF is ${budget} bytes without its output intent profile; Gelato allows at most ${options.maxBytes} bytes in our setup` : `${bytes.byteLength} bytes (${budget} without the ${outputIntentBytes}-byte output intent profile; budget ${options.maxBytes})`);
+  // The whole file counts: it is uploaded as one file (Gelato sets no maximum; our storage does).
+  add("file-size", "File size within the upload limit of the file storage (Gelato sets no maximum)", bytes.byteLength > options.maxBytes ? "FAIL" : "PASS", bytes.byteLength > options.maxBytes ? `Calendar PDF is ${bytes.byteLength} bytes; the upload limit allows at most ${options.maxBytes} bytes` : `${bytes.byteLength} bytes of ${options.maxBytes} allowed (${outputIntentBytes} of them the GRACoL output intent profile)`);
   return { checks, outputIntentBytes };
 }
 

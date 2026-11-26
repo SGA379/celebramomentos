@@ -35,10 +35,13 @@ export type CalendarLanguage = "es" | "pt";
 
 export const CALENDAR_PAGES = 14;
 export const CALENDAR_BLEED_MM = 4;
+// The largest file the pipeline can store: Cloudinary's per-file limit for raw files on the current (Free) plan,
+// read from the Admin API usage endpoint on 2026-11-26 (media_limits.raw_max_size_bytes). The whole PDF counts.
+// GELATO_CALENDAR_MAX_PDF_BYTES overrides it (e.g. after a plan upgrade).
 export const CALENDAR_MAX_BYTES = 10_485_760;
 // Bumped whenever the generated file changes in a way the print shop must receive: calendar PDFs made by
 // an older version are made again instead of being reused (see the signature in lib/pod/fulfillment.ts).
-export const CALENDAR_PDF_VERSION = 3;
+export const CALENDAR_PDF_VERSION = 4;
 // Gelato's safe area: content at least 4 mm inside the trim, 12 mm on the binding side (the wire at the top).
 export const CALENDAR_SAFE_MM = 4;
 export const CALENDAR_BINDING_SAFE_MM = 12;
@@ -249,15 +252,21 @@ export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array
   return withPdfVersion16(await pdf.save({ useObjectStreams: false }));
 }
 
+// The text each page must show, in order: cover (year, title), the 12 months (name in capitals, year), back.
+export function calendarPageText(year: number, language: CalendarLanguage) {
+  return [[String(year), TITLE[language].toUpperCase()], ...MONTHS[language].map((name) => [name.toUpperCase(), String(year)]), ["celebra-momentos.com"]];
+}
+
 // Every requirement the print shop's preflight looks at, checked on the saved file (PASS / WARN / FAIL).
-export async function calendarPreflight(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES) {
-  return preflightPdf(bytes, { pages: CALENDAR_PAGES, trimMm: trimPage, bleedMm: CALENDAR_BLEED_MM, safeMm: CALENDAR_SAFE_MM, bindingSafeMm: CALENDAR_BINDING_SAFE_MM, bindingEdge: "top", minDpi: CALENDAR_MIN_DPI, maxDpi: CALENDAR_MAX_DPI, minFontPt: 7, maxBytes });
+// `content` (year and language) adds the page order check.
+export async function calendarPreflight(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES, content?: { year: number; language: CalendarLanguage }) {
+  return preflightPdf(bytes, { pages: CALENDAR_PAGES, trimMm: trimPage, bleedMm: CALENDAR_BLEED_MM, safeMm: CALENDAR_SAFE_MM, bindingSafeMm: CALENDAR_BINDING_SAFE_MM, bindingEdge: "top", minDpi: CALENDAR_MIN_DPI, maxDpi: CALENDAR_MAX_DPI, minFontPt: 7, maxBytes, ...(content ? { pageText: calendarPageText(content.year, content.language) } : {}) });
 }
 
 // The last check before the file is stored and sent. Throws with the first failed requirement; a size
 // problem says "allows at most" (the caller then retries with smaller photos).
-export async function validateCalendarPdf(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES) {
-  const { checks } = await calendarPreflight(bytes, trimPage, maxBytes);
+export async function validateCalendarPdf(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES, content?: { year: number; language: CalendarLanguage }) {
+  const { checks } = await calendarPreflight(bytes, trimPage, maxBytes, content);
   const failed = checks.find((check) => check.status === "FAIL");
   if (failed) throw new Error(failed.detail);
   // Leading numbers of the font and image lines: embedded fonts, placed images.

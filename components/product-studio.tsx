@@ -524,7 +524,7 @@ export function WallArtStudio() {
       {studio.variant && <span className="absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-white/90 px-3 py-1 text-[11px] font-black text-[#182443] shadow-sm">{studio.variant.name}</span>}
     </div>
   );
-  return <StudioShell eyebrow={es ? "ARTE DE PARED PERSONALIZADO" : "ARTE DE PAREDE PERSONALIZADA"} title={es ? "Tus recuerdos convertidos en arte" : "As tuas memórias transformadas em arte"} body={es ? "Póster de calidad museo con colgador de madera. Elige el tamaño, el colgador y la orientación, y sube tu foto." : "Poster de qualidade museu com suporte de madeira. Escolhe o tamanho, o suporte e a orientação, e carrega a tua foto."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más arte de pared" : "Mais arte de parede"} action={catalogAction(studio, cart, es, [photo], {}, "/wall-art")} />;
+  return <StudioShell eyebrow={es ? "ARTE DE PARED PERSONALIZADO" : "ARTE DE PAREDE PERSONALIZADA"} title={es ? "Tus recuerdos convertidos en arte" : "As tuas memórias transformadas em arte"} body={es ? "Póster de papel mate clásico con colgador de madera. Elige el tamaño, el colgador y la orientación, y sube tu foto." : "Poster em papel mate clássico com suporte de madeira. Escolhe o tamanho, o suporte e a orientação, e carrega a tua foto."} controls={controls} preview={preview} es={es} studio={studio} catalogTitle={es ? "Más arte de pared" : "Mais arte de parede"} action={catalogAction(studio, cart, es, [photo], {}, "/wall-art")} />;
 }
 
 // ── Magnets (Prodigi, rectangular 7.6 × 5.1 cm) ──────────────────────────────

@@ -15,7 +15,7 @@ import type { PodProvider } from "@prisma/client";
 import { mmToPx, type ImageCrop, type MugCrops } from "@/lib/crop";
 import { POSTER_DPI } from "@/lib/print-quality";
 import { gelatoFormatMm, type PrintSpec } from "./artwork";
-import { GELATO_CALENDAR_UIDS, GELATO_POSTER_HANGER_UIDS, GELATO_TOUGH_CASE_UIDS, gelatoCalendarPageMm } from "./gelato-catalog";
+import { GELATO_CALENDAR_UIDS, GELATO_POSTER_HANGER_UIDS, GELATO_POSTER_HANGER_UIDS_BY_PAPER, GELATO_TOUGH_CASE_UIDS, gelatoCalendarPageMm, WALL_ART_POSTER_PAPER, type GelatoPosterPaper } from "./gelato-catalog";
 import type { PodIssue } from "./types";
 
 export type ItemContext = {
@@ -35,7 +35,16 @@ export type ItemContext = {
   crop?: ImageCrop | null;
   // New mug designs have one independently framed upload for each side.
   mugCrops?: MugCrops | null;
+  // Wall Art: the poster paper (default: the current one, WALL_ART_POSTER_PAPER). An item already planned keeps
+  // the paper it was bought with (wallArtPosterPaper).
+  posterPaper?: GelatoPosterPaper;
 };
+
+// The paper of an item planned before: museum-quality archival paper stays museum-quality (the customer bought
+// that); anything else uses the current Wall Art paper.
+export function wallArtPosterPaper(previousProductRef: string | null | undefined): GelatoPosterPaper {
+  return previousProductRef?.includes("_250-gsm-100lb-uncoated-offwhite-archival_") ? "museum" : WALL_ART_POSTER_PAPER;
+}
 
 // One print shop line. Magnet packs become one line per photo (each magnet has its own picture).
 export type MappedUnit = { productRef: string | null; specs: PrintSpec[]; label?: string };
@@ -152,7 +161,7 @@ function mapGelato(ctx: ItemContext): ItemMapping {
     const format = gelatoPosterFormat(ctx.variantName);
     const orientation = /horiz|paisaj|landscape/i.test(optionValue(ctx.options, /orienta/i) || "") ? "hor" : "ver";
     const color = gelatoHangerColor(optionValue(ctx.options, /marco|frame|colgador|hanger|moldura|suporte/i));
-    const uid = ctx.podSku || (format ? GELATO_POSTER_HANGER_UIDS[`${format}|${orientation}|${color}`] : undefined);
+    const uid = ctx.podSku || (format ? GELATO_POSTER_HANGER_UIDS_BY_PAPER[ctx.posterPaper ?? WALL_ART_POSTER_PAPER][`${format}|${orientation}|${color}`] : undefined);
     if (!uid) return { units: [], issues: [blocker("unmapped", format ? `Gelato has no ${format} poster in ${orientation === "hor" ? "landscape" : "portrait"} with a ${color} hanger` : `Size "${ctx.variantName}" has no Gelato poster format`)] };
     if (!ctx.photoCount) return { units: [], issues: [blocker("missing_photos", "The order has no poster photo")] };
     const mm = format ? gelatoFormatMm(format) : null;
