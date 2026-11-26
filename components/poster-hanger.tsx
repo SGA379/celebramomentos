@@ -1,4 +1,4 @@
-// Wall Art preview: museum-quality poster with a hanger (Gelato, PRODUCTS.pdf).
+// Wall Art preview: classic matte paper poster with a hanger (Gelato Poster+Hanger, lib/pod/gelato-catalog.ts).
 // Wooden bars on the top and bottom edges and a string to a nail, matching the
 // client's reference image. The hanger colour and orientation follow the
 // product options chosen in the studio.

@@ -17,12 +17,16 @@
 // - TrimBox (the calendar size) and BleedBox (+4 mm) on every page, so the trim line is explicit;
 // - photos as plain baseline RGB JPEGs without embedded ICC / EXIF segments (the caller converts them to
 //   sRGB first; the cover photo of the refused file carried a non-conformant ICC v4.3 profile);
-// - a classic cross-reference table (no object or xref streams).
+// - a classic cross-reference table (no object or xref streams);
+// - PDF/X-4 with the GRACoL 2006 output intent, as Gelato's PDF requirements ask, the photos and design
+//   colours colour-managed as sRGB (lib/pod/pdf-preflight.ts applyPdfX4);
+// - every requirement checked on the saved file before it is used (validateCalendarPdf → preflightPdf).
 import { readFileSync } from "fs";
 import path from "path";
 import fontkit from "@pdf-lib/fontkit";
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
+import { PDFDocument, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import { calendarLayout, type Box } from "./calendar-layout";
+import { applyPdfX4, preflightPdf, withPdfVersion16, type PreflightCheck } from "./pdf-preflight";
 
 // The layout is shared with the product studio (image size recommendations), which cannot load pdf-lib.
 export { boxPixels, calendarLayout, type Box } from "./calendar-layout";
@@ -31,10 +35,19 @@ export type CalendarLanguage = "es" | "pt";
 
 export const CALENDAR_PAGES = 14;
 export const CALENDAR_BLEED_MM = 4;
+// The largest file the pipeline can store: Cloudinary's per-file limit for raw files on the current (Free) plan,
+// read from the Admin API usage endpoint on 2026-11-26 (media_limits.raw_max_size_bytes). The whole PDF counts.
+// GELATO_CALENDAR_MAX_PDF_BYTES overrides it (e.g. after a plan upgrade).
 export const CALENDAR_MAX_BYTES = 10_485_760;
 // Bumped whenever the generated file changes in a way the print shop must receive: calendar PDFs made by
 // an older version are made again instead of being reused (see the signature in lib/pod/fulfillment.ts).
-export const CALENDAR_PDF_VERSION = 2;
+export const CALENDAR_PDF_VERSION = 4;
+// Gelato's safe area: content at least 4 mm inside the trim, 12 mm on the binding side (the wire at the top).
+export const CALENDAR_SAFE_MM = 4;
+export const CALENDAR_BINDING_SAFE_MM = 12;
+// Gelato: images 150–300 dpi at actual print size.
+export const CALENDAR_MIN_DPI = 150;
+export const CALENDAR_MAX_DPI = 300;
 
 // Liberation fonts (SIL Open Font License, lib/pod/fonts/LICENSE-Liberation-OFL.txt), shipped unmodified.
 // Listed in next.config.mjs (outputFileTracingIncludes) so they are deployed with the server functions.
@@ -73,19 +86,6 @@ export function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
   let at = 0;
   for (const part of parts) { out.set(part, at); at += part.length; }
   return out;
-}
-
-// The markers of a JPEG's header segments (up to the image data).
-function jpegMarkers(bytes: Uint8Array) {
-  const markers: number[] = [];
-  let offset = 2;
-  while (offset + 4 <= bytes.length && bytes[offset] === 0xff) {
-    const marker = bytes[offset + 1];
-    markers.push(marker);
-    if (marker === 0xda) break;
-    offset += 2 + ((bytes[offset + 2] << 8) | bytes[offset + 3]);
-  }
-  return markers;
 }
 
 export function calendarPdfPage(page: { width: number; height: number }) {
@@ -243,86 +243,33 @@ export async function buildCalendarPdf(input: CalendarInput): Promise<Uint8Array
 
   // ── Back ──
   const back = addPage();
-  at(back).text("celebra-momentos.com", input.page.width / 2, input.page.height - layout.margin - 4, fonts.sans, Math.min(3.2, input.page.width * 0.016), MUTED, "center");
+  // Never below 7 pt (Gelato's minimum text size); only the narrow formats (< 154 mm wide) reach that floor.
+  at(back).text("celebra-momentos.com", input.page.width / 2, input.page.height - layout.margin - 4, fonts.sans, Math.min(3.2, Math.max(input.page.width * 0.016, 7 / PT)), MUTED, "center");
 
   // The pages are left unpainted outside the design (the paper is white).
-  return pdf.save({ useObjectStreams: false });
+  await pdf.flush();
+  applyPdfX4(pdf, { title: `${TITLE[input.language]} ${input.year}`, creator: "Celebra Momentos", images: Array.from(embeddedImages.values(), (image) => image.ref) });
+  return withPdfVersion16(await pdf.save({ useObjectStreams: false }));
 }
 
-// A box of the page dictionary (only when the page itself sets it: pdf-lib's getters fall back to the
-// MediaBox), in mm.
-function pageBoxMm(page: PDFPage, name: "TrimBox" | "BleedBox") {
-  const value = page.node.get(PDFName.of(name));
-  if (!(value instanceof PDFArray) || value.size() !== 4) return null;
-  const [x1, y1, x2, y2] = value.asArray().map((item) => Number(item.toString()) / PT);
-  return { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+// The text each page must show, in order: cover (year, title), the 12 months (name in capitals, year), back.
+export function calendarPageText(year: number, language: CalendarLanguage) {
+  return [[String(year), TITLE[language].toUpperCase()], ...MONTHS[language].map((name) => [name.toUpperCase(), String(year)]), ["celebra-momentos.com"]];
 }
 
-const close = (a: number, b: number) => Math.abs(a - b) <= 0.01;
-
-// Whether a font dictionary carries its font program (directly or, for Type0 fonts, in its descendant).
-function fontEmbedded(pdf: PDFDocument, font: PDFDict): boolean {
-  const descendants = font.lookup(PDFName.of("DescendantFonts"));
-  if (descendants instanceof PDFArray) return descendants.asArray().every((item) => { const child = pdf.context.lookup(item); return child instanceof PDFDict && fontEmbedded(pdf, child); });
-  const descriptor = font.lookup(PDFName.of("FontDescriptor"));
-  return descriptor instanceof PDFDict && ["FontFile", "FontFile2", "FontFile3"].some((key) => descriptor.get(PDFName.of(key)) instanceof PDFRef);
+// Every requirement the print shop's preflight looks at, checked on the saved file (PASS / WARN / FAIL).
+// `content` (year and language) adds the page order check.
+export async function calendarPreflight(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES, content?: { year: number; language: CalendarLanguage }) {
+  return preflightPdf(bytes, { pages: CALENDAR_PAGES, trimMm: trimPage, bleedMm: CALENDAR_BLEED_MM, safeMm: CALENDAR_SAFE_MM, bindingSafeMm: CALENDAR_BINDING_SAFE_MM, bindingEdge: "top", minDpi: CALENDAR_MIN_DPI, maxDpi: CALENDAR_MAX_DPI, minFontPt: 7, maxBytes, ...(content ? { pageText: calendarPageText(content.year, content.language) } : {}) });
 }
 
-// The last check before the file is stored and sent: what the print shop's preflight looks at. Throws with
-// the first problem found; size problems say "allows at most" (the caller then retries with smaller photos).
-export async function validateCalendarPdf(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES) {
-  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 8));
-  if (!head.startsWith("%PDF-1.")) throw new Error("Calendar PDF does not start with a PDF header");
-  const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
-  const text = new TextDecoder("latin1").decode(bytes);
-  if (/\/Type\s*\/(ObjStm|XRef)\b/.test(text) || !/\nxref\r?\n/.test(text)) throw new Error("Calendar PDF must use a classic cross-reference table (no object or xref streams)");
-  if (/\/Encrypt\b/.test(text)) throw new Error("Calendar PDF must not be encrypted");
-  const expected = calendarPdfPage(trimPage);
-  const pages = pdf.getPages();
-  if (pages.length !== CALENDAR_PAGES) throw new Error(`Calendar PDF has ${pages.length} pages; Gelato requires ${CALENDAR_PAGES}`);
-  const fontsChecked = new Set<string>();
-  const imagesChecked = new Set<string>();
-  for (const [index, page] of pages.entries()) {
-    const label = `Calendar PDF page ${index + 1}`;
-    const widthMm = page.getWidth() / PT;
-    const heightMm = page.getHeight() / PT;
-    if (!close(widthMm, expected.width) || !close(heightMm, expected.height)) {
-      throw new Error(`${label} is ${widthMm.toFixed(2)} × ${heightMm.toFixed(2)} mm; expected ${expected.width} × ${expected.height} mm including ${CALENDAR_BLEED_MM} mm bleed`);
-    }
-    if (page.getRotation().angle % 360 !== 0) throw new Error(`${label} is rotated`);
-    const trim = pageBoxMm(page, "TrimBox");
-    const bleed = pageBoxMm(page, "BleedBox");
-    if (!trim || !close(trim.x, CALENDAR_BLEED_MM) || !close(trim.y, CALENDAR_BLEED_MM) || !close(trim.width, trimPage.width) || !close(trim.height, trimPage.height)) throw new Error(`${label} has no TrimBox of ${trimPage.width} × ${trimPage.height} mm inside the ${CALENDAR_BLEED_MM} mm bleed`);
-    if (!bleed || !close(bleed.x, 0) || !close(bleed.y, 0) || !close(bleed.width, expected.width) || !close(bleed.height, expected.height)) throw new Error(`${label} has no BleedBox covering the whole page`);
-    const resources = page.node.Resources();
-    const fontDict = resources?.lookup(PDFName.of("Font"));
-    if (fontDict instanceof PDFDict) {
-      for (const [, ref] of fontDict.entries()) {
-        const key = ref.toString();
-        if (fontsChecked.has(key)) continue;
-        fontsChecked.add(key);
-        const font = pdf.context.lookup(ref);
-        if (!(font instanceof PDFDict) || !fontEmbedded(pdf, font)) throw new Error(`${label} uses a font that is not embedded (${font instanceof PDFDict ? String(font.get(PDFName.of("BaseFont"))) : key})`);
-      }
-    }
-    const objects = resources?.lookup(PDFName.of("XObject"));
-    if (objects instanceof PDFDict) {
-      for (const [, ref] of objects.entries()) {
-        const key = ref.toString();
-        if (imagesChecked.has(key)) continue;
-        imagesChecked.add(key);
-        const stream = pdf.context.lookup(ref);
-        if (!(stream instanceof PDFRawStream) || String(stream.dict.get(PDFName.of("Subtype"))) !== "/Image") continue;
-        const filter = String(stream.dict.get(PDFName.of("Filter")));
-        const space = String(stream.dict.get(PDFName.of("ColorSpace")));
-        const bits = String(stream.dict.get(PDFName.of("BitsPerComponent")));
-        if (filter !== "/DCTDecode" || !["/DeviceRGB", "/DeviceGray"].includes(space) || bits !== "8") throw new Error(`${label} has an image that is not an 8-bit RGB JPEG (${filter}, ${space}, ${bits} bits)`);
-        const markers = jpegMarkers(stream.contents);
-        if (markers.some(DROPPED_SEGMENT)) throw new Error(`${label} has a JPEG photo with embedded ICC / EXIF metadata`);
-        if (!markers.includes(0xc0) && !markers.includes(0xc1)) throw new Error(`${label} has a JPEG photo that is not baseline-encoded`);
-      }
-    }
-  }
-  if (bytes.byteLength > maxBytes) throw new Error(`Calendar PDF is ${bytes.byteLength} bytes; Gelato allows at most ${maxBytes} bytes`);
-  return { pages: pages.length, bytes: bytes.byteLength, pageMm: expected, bleedMm: CALENDAR_BLEED_MM, fonts: fontsChecked.size, images: imagesChecked.size };
+// The last check before the file is stored and sent. Throws with the first failed requirement; a size
+// problem says "allows at most" (the caller then retries with smaller photos).
+export async function validateCalendarPdf(bytes: Uint8Array, trimPage: { width: number; height: number }, maxBytes = CALENDAR_MAX_BYTES, content?: { year: number; language: CalendarLanguage }) {
+  const { checks } = await calendarPreflight(bytes, trimPage, maxBytes, content);
+  const failed = checks.find((check) => check.status === "FAIL");
+  if (failed) throw new Error(failed.detail);
+  // Leading numbers of the font and image lines: embedded fonts, placed images.
+  const count = (id: string) => Number(checks.find((check) => check.id === id)?.detail.match(/^(\d+)/)?.[1] ?? 0);
+  return { pages: CALENDAR_PAGES, bytes: bytes.byteLength, pageMm: calendarPdfPage(trimPage), bleedMm: CALENDAR_BLEED_MM, fonts: count("fonts-embedded"), images: count("image-resolution"), checks: checks as PreflightCheck[] };
 }

@@ -129,8 +129,8 @@ export default function Home({ homepageImages }: { homepageImages: HomepageImage
     {
       name: es ? "Arte de pared" : "Arte de parede",
       description: es
-        ? "Póster de calidad museo con colgador de madera"
-        : "Poster de qualidade museu com suporte de madeira",
+        ? "Póster de papel mate clásico con colgador de madera"
+        : "Poster em papel mate clássico com suporte de madeira",
       href: "/wall-art",
       image: img("category.WALL_ART"),
       accent: "bg-[#e7f1eb]",

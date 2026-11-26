@@ -19,7 +19,7 @@ import type { CardDesignSide } from "@/lib/store";
 import { STORED_STATUS, printStage } from "@/lib/order-progress";
 import { podProviderLabel } from "@/lib/products";
 import { checkPhotoResolution, checkPrintFileSize, isCloudinaryUrl, mugFileUrl, printFileUrl, type PhotoFit, type PrintSpec } from "./artwork";
-import { mapOrderItem } from "./catalog";
+import { mapOrderItem, wallArtPosterPaper } from "./catalog";
 import { podAutoSubmit, podEnvironmentProblem, podMode } from "./config";
 import { PodApiError, redact } from "./http";
 import { pdfDeliverable, renderCalendarFile, renderCompositeFile, renderPrintFile, uploadedFiles, type UploadedFile } from "./print-files";
@@ -44,7 +44,9 @@ export type DesignReference = { label: string; side?: string; url: string; width
 // kind: how the file is made — "photo" / "pages" / "calendar" automatically by the site, "admin" attached by
 // hand (only products with no automatic file). Missing on slots saved before it existed.
 // signature: what a generated file was made from (calendar: year, language, size, photos), to reuse it.
-export type ArtworkSlot = { unit: number; productRef: string | null; area: string; url: string | null; source: "design" | "customer" | "admin" | null; kind?: "photo" | "pages" | "admin" | "calendar"; description?: string; width?: number; height?: number; format?: "jpg" | "png" | "pdf"; fit?: PhotoFit; original?: string | null; verified?: { width: number; height: number } | null; references?: DesignReference[]; signature?: string; pages?: number };
+// file (calendar PDFs): the generated file's size and MD5 (checked against what is delivered) and the photo
+// resolution and JPEG quality it was saved with.
+export type ArtworkSlot = { unit: number; productRef: string | null; area: string; url: string | null; source: "design" | "customer" | "admin" | null; kind?: "photo" | "pages" | "admin" | "calendar"; description?: string; width?: number; height?: number; format?: "jpg" | "png" | "pdf"; fit?: PhotoFit; original?: string | null; verified?: { width: number; height: number } | null; references?: DesignReference[]; signature?: string; pages?: number; file?: { bytes: number; md5: string; dpi: number; quality: number; maxBytes: number } };
 
 const asObject = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const asString = (value: unknown) => (typeof value === "string" ? value : null);
@@ -94,6 +96,8 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
     printeers: printeersSelection(product.printeers),
     crop: kind === "MUG" ? normalizeCrop(product.crop as Partial<ImageCrop>) : null,
     mugCrops: kind === "MUG" && product.mugCrops ? normalizeMugCrops(product.mugCrops as { front?: Partial<ImageCrop>; back?: Partial<ImageCrop> }, product.crop as Partial<ImageCrop>) : null,
+    // Planned again (e.g. resent): a poster keeps the paper it was first sent with.
+    posterPaper: kind === "WALL_ART" ? wallArtPosterPaper(item.podProductRef) : undefined,
   });
   const issues = [...mapping.issues];
   const artwork: ArtworkSlot[] = [];
@@ -219,19 +223,24 @@ export async function planItem(item: OrderItem, previous: ArtworkSlot[], fixedPr
           issues.push({ code: "missing_photos", severity: "blocker", message: `${prefix}The calendar has no photo that was uploaded to this site` });
           continue;
         }
-        const reusable = before?.kind === "calendar" && before.source === "design" && before.url && before.signature === signature ? before.url : null;
+        const reusable = before?.kind === "calendar" && before.source === "design" && before.url && before.signature === signature ? before : null;
         let failure: string | null = null;
-        const url = reusable ?? (await renderCalendarFile({ orderId: item.orderId, itemId: item.id, unit: unitIndex, area: spec.area, photos: monthPhotos, cover, year, language, pageMm }).catch((reason) => { failure = reason instanceof Error ? reason.message : "unknown error"; return null; }))?.url ?? null;
+        const made = reusable ? null : await renderCalendarFile({ orderId: item.orderId, itemId: item.id, unit: unitIndex, area: spec.area, photos: monthPhotos, cover, year, language, pageMm }).catch((reason) => { failure = reason instanceof Error ? reason.message : "unknown error"; return null; });
+        const url = reusable?.url ?? made?.url ?? null;
+        // Kept on the slot so every later check verifies the stored file and the note below survives reuse.
+        const file = made ? { bytes: made.bytes, md5: made.md5, dpi: made.dpi, quality: made.quality, maxBytes: made.maxBytes } : reusable?.file ?? null;
         if (!url) {
           logPod("calendar print file not made", { itemId: item.id, failure });
           artwork.push({ ...base, url: null, source: null });
           issues.push({ code: "print_file_render_failed", severity: "blocker", message: `${prefix}The calendar PDF could not be made yet (${failure}); it is retried automatically` });
           continue;
         }
-        artwork.push({ ...base, url, source: "design", signature, pages: 14, verified: null });
-        // Never send a link the print shop cannot open.
-        const reachable = await pdfDeliverable(url);
-        if (!reachable.ok) issues.push({ code: "print_file_unreachable", severity: "blocker", message: `${prefix}The calendar PDF was made, but the print shop could not download it: ${reachable.reason}` });
+        artwork.push({ ...base, url, source: "design", signature, pages: 14, verified: null, ...(file ? { file } : {}) });
+        // Never send a link the print shop cannot open, nor a stored file that is not the one made and checked.
+        const reachable = await pdfDeliverable(url, file);
+        if (!reachable.ok) issues.push({ code: "print_file_unreachable", severity: "blocker", message: `${prefix}The calendar PDF was made, but the print shop could not download it${reachable.corrupt ? " intact" : ""}: ${reachable.reason}` });
+        // Photos are stepped down only to fit the file storage's upload limit; the admin is told, never silently.
+        if (file && (file.dpi < 300 || file.quality < 75)) issues.push({ code: "calendar_photos_reduced", severity: "info", message: `${prefix}To stay within the ${Math.round(file.maxBytes / 1_048_576)} MB upload limit of the file storage, the calendar photos were saved at ${file.dpi} dpi, JPEG quality ${file.quality} (within Gelato's 150–300 dpi). A larger storage plan avoids this` });
         // Notes for the admin (the calendar is still sent): empty months and photos below 150 dpi.
         const empty = monthPhotos.map((photo, month) => (photo ? null : monthName(language, month))).filter(Boolean);
         if (empty.length) issues.push({ code: "calendar_months_without_photo", severity: "info", message: `${prefix}${12 - empty.length} of 12 months have a photo; ${empty.join(", ")} get a page with the month name instead` });
