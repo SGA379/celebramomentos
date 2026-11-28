@@ -6,6 +6,7 @@ import { prisma } from "@/lib/server/prisma";
 import { stripe } from "@/lib/server/stripe";
 import { handlePaidOrderInBackground } from "@/lib/pod/fulfillment";
 import { sendOrderConfirmationInBackground } from "@/lib/server/order-email";
+import { stripeEnvironment } from "@/lib/server/payment-environment";
 
 export const runtime = "nodejs";
 // Leaves time for the print shop submission that continues after the response.
@@ -32,7 +33,8 @@ export async function POST(request: NextRequest) {
       const claimed = await prisma.$transaction(async (tx) => {
         const claim = await tx.order.updateMany({ where: { id: order.id, status: "PENDING" }, data: { status: "PAID" } });
         if (claim.count === 0) return false;
-        await tx.payment.updateMany({ where: { orderId: order.id, status: "PENDING" }, data: { status: "SUCCEEDED", stripeCheckoutId: session.id, stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined } });
+        // The environment (live / test) Stripe reports for the session: print orders are only sent for payments of the site's own environment.
+        await tx.payment.updateMany({ where: { orderId: order.id, status: "PENDING" }, data: { status: "SUCCEEDED", stripeCheckoutId: session.id, stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined, raw: { sessionId: session.id, environment: stripeEnvironment(session.livemode) } } });
         if (order.discountUsages.length) await tx.discount.update({ where: { id: order.discountUsages[0].discountId }, data: { usedCount: { increment: 1 } } });
         const lineIds = Array.isArray(order.cartLineIds) ? order.cartLineIds.filter((value): value is string => typeof value === "string") : [];
         await tx.cartLine.deleteMany({ where: lineIds.length ? { customerId: customer.id, id: { in: lineIds } } : { customerId: customer.id } });

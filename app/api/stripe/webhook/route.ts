@@ -4,6 +4,7 @@ import { prisma } from "@/lib/server/prisma";
 import { stripe } from "@/lib/server/stripe";
 import { handlePaidOrderInBackground } from "@/lib/pod/fulfillment";
 import { sendOrderConfirmationInBackground } from "@/lib/server/order-email";
+import { stripeEnvironment } from "@/lib/server/payment-environment";
 
 export const runtime = "nodejs";
 // Leaves time for the print shop submission that continues after the response.
@@ -37,14 +38,15 @@ export async function POST(request: NextRequest) {
         // Claim the order: if the success page's confirm call got there first, there is nothing left to do.
         const claim = await tx.order.updateMany({ where: { id: order.id, status: "PENDING" }, data: { status: "PAID" } });
         if (claim.count === 0) return;
-        await tx.payment.update({ where: { id: payment.id }, data: { status: "SUCCEEDED", stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined, raw: { eventId: event.id, type: event.type } } });
+        // The environment (live / test) Stripe reports: print orders are only sent for payments of the site's own environment.
+        await tx.payment.update({ where: { id: payment.id }, data: { status: "SUCCEEDED", stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : undefined, raw: { eventId: event.id, type: event.type, environment: stripeEnvironment(event.livemode) } } });
         if (order.discountUsages.length) await tx.discount.update({ where: { id: order.discountUsages[0].discountId }, data: { usedCount: { increment: 1 } } });
         const lineIds = Array.isArray(order.cartLineIds) ? order.cartLineIds.filter((value): value is string => typeof value === "string") : [];
         if (order.customerId) await tx.cartLine.deleteMany({ where: lineIds.length ? { customerId: order.customerId, id: { in: lineIds } } : { customerId: order.customerId } });
       } else if (event.type === "checkout.session.async_payment_failed" || event.type === "checkout.session.expired") {
         if (order.status !== "PENDING") return;
         await tx.order.updateMany({ where: { id: order.id, status: "PENDING" }, data: { status: "CANCELLED" } });
-        await tx.payment.update({ where: { id: payment.id }, data: { status: event.type.endsWith("expired") ? "CANCELLED" : "FAILED", raw: { eventId: event.id, type: event.type } } });
+        await tx.payment.update({ where: { id: payment.id }, data: { status: event.type.endsWith("expired") ? "CANCELLED" : "FAILED", raw: { eventId: event.id, type: event.type, environment: stripeEnvironment(event.livemode) } } });
       }
     });
   } catch (error) {

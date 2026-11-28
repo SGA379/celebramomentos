@@ -4,6 +4,7 @@
 // neither produces nor charges a draft until it is confirmed.
 import { printfulConfig } from "../config";
 import { PodApiError, podRequest, type FetchLike } from "../http";
+import { assertProviderRequestAllowed, DRY_RUN_PREFIX, isDryRunOrder, providerWritesAllowed } from "../provider-guard";
 import { httpsLink, isoDate, primaryShipment, type Shipment, type ShipmentStatus, type TrackingInfo } from "../tracking";
 import type { PodAdapter, PodFulfillmentStatus, ProviderOrderState, SubmissionInput } from "../types";
 
@@ -156,6 +157,8 @@ export async function checkPrintfulApi(fetchImpl?: FetchLike): Promise<PrintfulA
 
 export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments(providerOrderId: string): Promise<PrintfulV2Shipment[]> } {
   const request = <T>(path: string, init: RequestInit = {}) => {
+    // Outside production nothing that could change the Printful account is ever sent (lib/pod/provider-guard.ts).
+    assertProviderRequestAllowed("PRINTFUL", init.method, path);
     const { token, storeId, baseUrl } = printfulConfig();
     return podRequest<T>("PRINTFUL", `${baseUrl}${path}`, { ...init, fetchImpl, headers: { Authorization: `Bearer ${token || ""}`, ...(storeId ? { "X-PF-Store-Id": storeId } : {}), "Content-Type": "application/json", Accept: "application/json" } });
   };
@@ -172,6 +175,13 @@ export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments
     provider: "PRINTFUL",
     configurationProblem: () => (printfulConfig().token ? null : "PRINTFUL_PRIVATE_TOKEN is not set"),
     async submit(input) {
+      // Not the production site: a dry run. Printful validates and prices the order (cost estimate), nothing is
+      // created.
+      if (!providerWritesAllowed()) {
+        const { body } = await request<{ result?: { costs?: { currency?: string; total?: number } } }>("/orders/estimate-costs", { method: "POST", body: JSON.stringify(buildPrintfulOrder(input)) });
+        if (!body.result?.costs) throw new PodApiError("PRINTFUL", null, "Printful did not return a cost estimate for the dry run", false, body);
+        return { providerOrderId: `${DRY_RUN_PREFIX}${input.reference}`, providerStatus: "dry run: validated by Printful (cost estimate), not sent", status: "SUBMITTED", problem: null, raw: { dryRun: true, costs: body.result.costs } };
+      }
       try {
         const { body } = await request<{ result?: PrintfulOrder }>(`/orders?confirm=${input.mode === "live" ? "true" : "false"}`, { method: "POST", body: JSON.stringify(buildPrintfulOrder(input)) });
         if (!body.result?.id) throw new Error("Printful did not return an order id");
@@ -188,6 +198,7 @@ export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments
     findByReference: (reference) => byExternalId(reference),
     // Confirms the draft for fulfilment (Printful then produces and charges it).
     async confirmDraft(providerOrderId) {
+      if (isDryRunOrder(providerOrderId)) throw new PodApiError("PRINTFUL", null, "A dry-run order was never sent to Printful and cannot be confirmed", false);
       const { body } = await request<{ result?: PrintfulOrder }>(`/orders/${encodeURIComponent(providerOrderId)}/confirm`, { method: "POST" });
       if (!body.result) throw new Error("Printful did not confirm the order");
       return parsePrintfulOrder(body.result);
@@ -195,6 +206,8 @@ export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments
     // DELETE /orders/{id}: cancels a draft or a confirmed order that is not in production yet (Printful refuses
     // once production has started).
     async cancel(providerOrderId) {
+      // A dry-run order exists only here: nothing to cancel at Printful.
+      if (isDryRunOrder(providerOrderId)) return { providerOrderId, providerStatus: "dry run cancelled (never sent)", status: "CANCELLED", problem: null };
       const { body } = await request<{ result?: PrintfulOrder }>(`/orders/${encodeURIComponent(providerOrderId)}`, { method: "DELETE" });
       if (!body.result) throw new Error("Printful did not return the cancelled order");
       const state = parsePrintfulOrder(body.result);
@@ -204,6 +217,7 @@ export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments
     // The v1 order (status, shipments) and, for orders that have shipments, the v2 shipments list (delivery
     // status, estimate, carrier events). A failed v2 read never hides the v1 status.
     async fetchStatus(providerOrderId) {
+      if (isDryRunOrder(providerOrderId)) return { providerOrderId, providerStatus: "dry run: validated by Printful (cost estimate), not sent", status: "SUBMITTED", problem: null };
       const id = encodeURIComponent(providerOrderId);
       const { body } = await request<{ result?: PrintfulOrder }>(`/orders/${id}`);
       if (!body.result) return null;
@@ -231,6 +245,8 @@ export function printfulAdapter(fetchImpl?: FetchLike): PodAdapter & { shipments
 export const PRINTFUL_WEBHOOK_TYPES = ["package_shipped", "package_returned", "order_updated", "order_failed", "order_canceled", "order_put_hold", "order_remove_hold"] as const;
 
 function printfulRequest<T>(path: string, init: RequestInit = {}, fetchImpl?: FetchLike) {
+  // Webhook registration changes the Printful store: production only (lib/pod/provider-guard.ts).
+  assertProviderRequestAllowed("PRINTFUL", init.method, path);
   const { token, storeId, baseUrl } = printfulConfig();
   return podRequest<T>("PRINTFUL", `${baseUrl}${path}`, { ...init, fetchImpl, timeoutMs: 8_000, headers: { Authorization: `Bearer ${token || ""}`, ...(storeId ? { "X-PF-Store-Id": storeId } : {}), "Content-Type": "application/json", Accept: "application/json" } });
 }

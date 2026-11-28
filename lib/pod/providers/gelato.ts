@@ -3,6 +3,7 @@
 // `orderType: "draft"` orders, which Gelato neither produces nor charges.
 import { gelatoConfig } from "../config";
 import { PodApiError, podRequest, type FetchLike } from "../http";
+import { assertProviderRequestAllowed, DRY_RUN_PREFIX, isDryRunOrder, providerWritesAllowed } from "../provider-guard";
 import { httpsLink, isoDate, primaryShipment, type Shipment, type ShipmentStatus, type TrackingInfo } from "../tracking";
 import type { PodAdapter, PodFulfillmentStatus, ProviderOrderState, SubmissionInput } from "../types";
 
@@ -184,8 +185,26 @@ export async function checkGelatoApi(fetchImpl?: FetchLike): Promise<GelatoApiHe
   }
 }
 
+// The read-only order quote (POST /v4/orders:quote) for the same order: Gelato checks the products, files and
+// address and prices it, without creating anything. Used for dry runs outside production.
+export function buildGelatoQuote(input: SubmissionInput) {
+  const order = buildGelatoOrder(input);
+  return {
+    orderReferenceId: order.orderReferenceId,
+    customerReferenceId: order.customerReferenceId,
+    currency: order.currency,
+    allowMultipleQuotes: false,
+    recipient: order.shippingAddress,
+    products: order.items,
+  };
+}
+
+type GelatoQuote = { quotes?: { products?: { itemReferenceId?: string; price?: number; currency?: string }[]; shipmentMethods?: { name?: string; price?: number }[] }[] };
+
 export function gelatoAdapter(fetchImpl?: FetchLike): PodAdapter {
   const request = <T>(path: string, init: RequestInit = {}) => {
+    // Outside production nothing that could change the Gelato account is ever sent (lib/pod/provider-guard.ts).
+    assertProviderRequestAllowed("GELATO", init.method, path);
     const { apiKey, baseUrl } = gelatoConfig();
     return podRequest<T>("GELATO", `${baseUrl}${path}`, { ...init, fetchImpl, headers: { "X-API-KEY": apiKey || "", "Content-Type": "application/json", Accept: "application/json" } });
   };
@@ -203,6 +222,13 @@ export function gelatoAdapter(fetchImpl?: FetchLike): PodAdapter {
     provider: "GELATO",
     configurationProblem: () => (gelatoConfig().apiKey ? null : "GELATO_API_KEY is not set"),
     async submit(input) {
+      // Not the production site: a dry run. Gelato validates and prices the order (quote), nothing is created.
+      if (!providerWritesAllowed()) {
+        const { body } = await request<GelatoQuote>("/v4/orders:quote", { method: "POST", body: JSON.stringify(buildGelatoQuote(input)) });
+        const quote = body?.quotes?.[0];
+        if (!quote?.products?.length) throw new PodApiError("GELATO", null, "Gelato did not return a quote for the dry run", false, body);
+        return { providerOrderId: `${DRY_RUN_PREFIX}${input.reference}`, providerStatus: "dry run: validated by Gelato (quote), not sent", status: "SUBMITTED", problem: null, raw: { dryRun: true, products: quote.products.map((product) => ({ itemReferenceId: product.itemReferenceId, price: product.price, currency: product.currency })) } };
+      }
       const { body } = await request<GelatoOrder>("/v4/orders", { method: "POST", body: JSON.stringify(buildGelatoOrder(input)) });
       if (!body?.id) throw new Error("Gelato did not return an order id");
       return { ...parseGelatoOrder(body), raw: { id: body.id, orderType: body.orderType, fulfillmentStatus: body.fulfillmentStatus, financialStatus: body.financialStatus } };
@@ -215,12 +241,15 @@ export function gelatoAdapter(fetchImpl?: FetchLike): PodAdapter {
     },
     // Converts the draft into a real order (Gelato then produces and charges it).
     async confirmDraft(providerOrderId) {
+      if (isDryRunOrder(providerOrderId)) throw new PodApiError("GELATO", null, "A dry-run order was never sent to Gelato and cannot be confirmed", false);
       const { body } = await request<GelatoOrder>(`/v4/orders/${encodeURIComponent(providerOrderId)}`, { method: "PATCH", body: JSON.stringify({ orderType: "order" }) });
       return parseGelatoOrder(body);
     },
     // A draft is deleted (DELETE /v4/orders/{id}); a real order is cancelled (POST /v4/orders/{id}:cancel),
     // which Gelato only allows before it is passed to production.
     async cancel(providerOrderId) {
+      // A dry-run order exists only here: nothing to cancel at Gelato.
+      if (isDryRunOrder(providerOrderId)) return { providerOrderId, providerStatus: "dry run cancelled (never sent)", status: "CANCELLED", problem: null };
       const id = encodeURIComponent(providerOrderId);
       const current = await orderOrGone(providerOrderId);
       if (!current) return gone(providerOrderId);
@@ -235,6 +264,7 @@ export function gelatoAdapter(fetchImpl?: FetchLike): PodAdapter {
       return { ...state, raw: { fulfillmentStatus: body.fulfillmentStatus } };
     },
     async fetchStatus(providerOrderId) {
+      if (isDryRunOrder(providerOrderId)) return { providerOrderId, providerStatus: "dry run: validated by Gelato (quote), not sent", status: "SUBMITTED", problem: null };
       const body = await orderOrGone(providerOrderId);
       if (!body) return gone(providerOrderId);
       return body?.id ? { ...parseGelatoOrder(body), raw: { fulfillmentStatus: body.fulfillmentStatus, financialStatus: body.financialStatus } } : null;

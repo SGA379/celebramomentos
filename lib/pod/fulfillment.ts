@@ -21,6 +21,7 @@ import { podProviderLabel } from "@/lib/products";
 import { checkPhotoResolution, checkPrintFileSize, isCloudinaryUrl, mugFileUrl, printFileUrl, type PhotoFit, type PrintSpec } from "./artwork";
 import { mapOrderItem, wallArtPosterPaper } from "./catalog";
 import { podAutoSubmit, podEnvironmentProblem, podMode } from "./config";
+import { paymentEnvironmentFor, recordedPaymentEnvironment } from "@/lib/server/payment-environment";
 import { PodApiError, redact } from "./http";
 import { pdfDeliverable, renderCalendarFile, renderCompositeFile, renderPrintFile, uploadedFiles, type UploadedFile } from "./print-files";
 import { boxPixels, calendarLayout, CALENDAR_PDF_VERSION, monthName, type CalendarLanguage } from "./calendar-pdf";
@@ -61,9 +62,46 @@ export function logPod(message: string, details: Record<string, unknown>) {
   console.error(`[pod] ${message}`, redact(details));
 }
 
-async function orderIsPaid(orderId: string) {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, payments: { where: { status: "SUCCEEDED" }, select: { id: true } } } });
-  return Boolean(order && (PAID_ORDER as readonly string[]).includes(order.status) && order.payments.length);
+// ── Live / test separation ───────────────────────────────────────────────────
+// Local development (test payments, POD_ORDER_MODE=draft) and production (live payments, live) share one
+// database. Rules, so a test order can never become a real, paid print order (and a live one is never touched
+// from a test environment):
+// - every print order keeps the mode it was created in (fulfillment.mode); it is only sent, resent or
+//   confirmed by a site running in that same mode, and sending never changes it;
+// - new print orders are only created for an order paid in the site's own payment environment
+//   (Payment.raw.environment, recorded from Stripe's livemode / the PayPal API used; see
+//   lib/server/payment-environment.ts). Unknown counts as not paid;
+// - payments recorded before the environment was stored (2026-11-28) are accepted only for print orders that
+//   already exist in the site's mode (they were created by the environment that took the payment);
+// - the cron and the background syncs only look at print orders of the site's mode.
+
+// How an order's payment relates to an environment: "verified" (a succeeded payment recorded in it),
+// "legacy" (succeeded, recorded before environments were stored), "other" (only payments of the other
+// environment) or "unpaid".
+export type OrderPaymentState = "verified" | "legacy" | "other" | "unpaid";
+export function orderPaymentState(order: { status: string; payments: { status: string; raw: Prisma.JsonValue | null }[] } | null, mode: PodMode): OrderPaymentState {
+  if (!order || !(PAID_ORDER as readonly string[]).includes(order.status)) return "unpaid";
+  const succeeded = order.payments.filter((payment) => payment.status === "SUCCEEDED");
+  if (!succeeded.length) return "unpaid";
+  const environments = succeeded.map((payment) => recordedPaymentEnvironment(payment.raw));
+  if (environments.includes(paymentEnvironmentFor(mode))) return "verified";
+  if (environments.some((environment) => environment !== null)) return "other";
+  return "legacy";
+}
+
+async function paymentState(orderId: string, mode: PodMode) {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, payments: { where: { status: "SUCCEEDED" }, select: { status: true, raw: true } } } });
+  return orderPaymentState(order, mode);
+}
+
+// Why a print order may not be sent (or resent) by this site, or null. `mode` is the print order's own mode.
+async function sendRefusal(orderId: string, mode: PodMode): Promise<string | null> {
+  const site = podMode();
+  if (mode !== site) return `This is a ${mode === "live" ? "live" : "test (draft)"} print order and this site runs in ${site === "live" ? "live" : "test (draft)"} mode: it can only be sent from a ${mode === "live" ? "live" : "test"} environment`;
+  const state = await paymentState(orderId, mode);
+  if (state === "unpaid") return "The order payment is not verified";
+  if (state === "other") return `The order was paid in the ${site === "live" ? "test" : "live"} payment environment: it is never sent as a ${site === "live" ? "live" : "test"} print order`;
+  return null;
 }
 
 // ── Preparing an order ───────────────────────────────────────────────────────
@@ -353,7 +391,12 @@ function statusFor(issues: PodIssue[], configurationProblem: string | null): Pod
 // Creates the order's fulfilments (one per shop). Safe to call any number of times:
 // existing fulfilments are kept and only items without one are added.
 export async function prepareFulfillments(orderId: string) {
-  if (!(await orderIsPaid(orderId))) return [];
+  // Only for an order paid in this site's payment environment (never a test payment on a live site).
+  const state = await paymentState(orderId, podMode());
+  if (state !== "verified") {
+    if (state !== "unpaid") logPod("print orders not created: the payment is not from this environment", { orderId, payment: state, mode: podMode() });
+    return [];
+  }
   const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { items: true, fulfillments: true } });
   const pending = order.items.filter((item) => !item.podFulfillmentId);
   if (!pending.length) return order.fulfillments;
@@ -384,6 +427,8 @@ export async function prepareFulfillments(orderId: string) {
 export async function refreshReadiness(fulfillmentId: string, { replan = false } = {}) {
   const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId }, include: { items: true } });
   if (!fulfillment || !["NEEDS_ATTENTION", "READY", "FAILED"].includes(fulfillment.status)) return fulfillment;
+  // A print order of the other environment (shared database) is left exactly as it is.
+  if (fulfillment.mode !== podMode()) return fulfillment;
   if (replan) {
     for (const item of fulfillment.items) {
       const plan = await planItem(item, readArtwork(item.podArtwork), fulfillment.provider);
@@ -505,7 +550,9 @@ export type SubmitResult = { ok: boolean; status: PodFulfillmentStatus; message?
 export async function submitFulfillment(fulfillmentId: string, { allowWarnings = false } = {}): Promise<SubmitResult> {
   const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId }, include: { items: true, order: true } });
   if (!fulfillment) return { ok: false, status: "FAILED", message: "Print order not found" };
-  if (!(await orderIsPaid(fulfillment.orderId))) return { ok: false, status: fulfillment.status, message: "The order payment is not verified" };
+  const ownMode: PodMode = fulfillment.mode === "live" ? "live" : "draft";
+  const refusal = await sendRefusal(fulfillment.orderId, ownMode);
+  if (refusal) return { ok: false, status: fulfillment.status, message: refusal };
   const issues = fulfillment.items.flatMap((item) => readIssues(item.podIssues));
   const blockers = issues.filter((issue) => issue.severity === "blocker");
   const allowed: PodFulfillmentStatus[] = ["READY", "FAILED", ...(allowWarnings && !blockers.length ? (["NEEDS_ATTENTION"] as PodFulfillmentStatus[]) : [])];
@@ -514,7 +561,7 @@ export async function submitFulfillment(fulfillmentId: string, { allowWarnings =
   // same failed order (or, at a shop without a reference lookup, create a duplicate). It is resent as a new
   // order on purpose instead (resendFulfillment).
   if (fulfillment.providerOrderId) return { ok: false, status: fulfillment.status, message: `${podProviderLabel(fulfillment.provider)} already has order ${fulfillment.providerOrderId} for this print order (${fulfillment.providerStatus || fulfillment.status.toLowerCase()}). Fix the cause, then use “Resend as new order”.` };
-  const mode = podMode();
+  const mode = ownMode;
   const adapter = podAdapter(fulfillment.provider);
   const problem = podEnvironmentProblem() ?? adapter.configurationProblem(mode);
   if (problem) {
@@ -529,8 +576,9 @@ export async function submitFulfillment(fulfillmentId: string, { allowWarnings =
     return { ok: false, status: "NEEDS_ATTENTION", message };
   }
 
-  // The lock: only one caller can move it to SUBMITTING.
-  const locked = await prisma.podFulfillment.updateMany({ where: { id: fulfillmentId, status: { in: allowed } }, data: { status: "SUBMITTING", mode, attempts: { increment: 1 }, lastError: null, nextAttemptAt: null } });
+  // The lock: only one caller can move it to SUBMITTING, and only while it still has the mode checked above.
+  // The mode is never changed here: a print order keeps the mode it was created in.
+  const locked = await prisma.podFulfillment.updateMany({ where: { id: fulfillmentId, status: { in: allowed }, mode: fulfillment.mode }, data: { status: "SUBMITTING", attempts: { increment: 1 }, lastError: null, nextAttemptAt: null } });
   if (locked.count !== 1) return { ok: false, status: "SUBMITTING", message: "This print order is already being sent" };
   const attempts = fulfillment.attempts + 1;
   try {
@@ -556,7 +604,9 @@ export async function confirmDraft(fulfillmentId: string): Promise<SubmitResult>
   const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId } });
   if (!fulfillment?.providerOrderId || fulfillment.mode !== "draft" || fulfillment.status !== "SUBMITTED") return { ok: false, status: fulfillment?.status ?? "FAILED", message: "Only a sent draft can be confirmed" };
   if (podMode() !== "live") return { ok: false, status: fulfillment.status, message: "Set POD_ORDER_MODE=live before confirming drafts for production" };
-  if (!(await orderIsPaid(fulfillment.orderId))) return { ok: false, status: fulfillment.status, message: "The order payment is not verified" };
+  // A draft becomes a real, paid print order: only for an order whose payment is recorded as live. Drafts made
+  // for test payments (and older payments without a recorded environment) are never confirmed.
+  if ((await paymentState(fulfillment.orderId, "live")) !== "verified") return { ok: false, status: fulfillment.status, message: "Only a draft of an order paid with a live payment can be confirmed; this one was paid in test mode (or before payment environments were recorded)" };
   const adapter = podAdapter(fulfillment.provider);
   if (!adapter.confirmDraft) return { ok: false, status: fulfillment.status, message: `${fulfillment.provider} has no drafts to confirm` };
   const state = await adapter.confirmDraft(fulfillment.providerOrderId);
@@ -588,9 +638,9 @@ export async function resendFulfillment(fulfillmentId: string): Promise<SubmitRe
   const previousId = fulfillment.providerOrderId;
   if (!previousId) return { ok: false, status: fulfillment.status, message: "The print shop never accepted this print order: use “Retry now” instead" };
   if (!["FAILED", "CANCELLED"].includes(fulfillment.status) || fulfillment.shippedAt) return { ok: false, status: fulfillment.status, message: "Only a print order the print shop failed or cancelled, and that never shipped, can be resent" };
-  if (!(await orderIsPaid(fulfillment.orderId))) return { ok: false, status: fulfillment.status, message: "The order payment is not verified" };
   const mode: PodMode = fulfillment.mode === "live" ? "live" : "draft";
-  if (podMode() !== mode) return { ok: false, status: fulfillment.status, message: `It was sent as a ${mode} order but the site now runs in ${podMode()} mode; it cannot be resent from here` };
+  const refusal = await sendRefusal(fulfillment.orderId, mode);
+  if (refusal) return { ok: false, status: fulfillment.status, message: refusal };
   const adapter = podAdapter(fulfillment.provider);
   const problem = podEnvironmentProblem() ?? adapter.configurationProblem(mode);
   if (problem) return { ok: false, status: fulfillment.status, message: problem };
@@ -636,6 +686,9 @@ export async function cancelFulfillment(fulfillmentId: string): Promise<SubmitRe
   const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId } });
   if (!fulfillment) return { ok: false, status: "FAILED", message: "Print order not found" };
   if (fulfillment.status === "CANCELLED") return { ok: true, status: "CANCELLED" };
+  // A test environment never cancels a live print order (the shops' test drafts and live orders share one
+  // account), and a live site leaves test print orders to the test environment.
+  if (fulfillment.mode !== podMode()) return { ok: false, status: fulfillment.status, message: `This is a ${fulfillment.mode === "live" ? "live" : "test (draft)"} print order; it can only be cancelled from a ${fulfillment.mode === "live" ? "live" : "test"} environment` };
   if (fulfillment.status === "SUBMITTING") return { ok: false, status: fulfillment.status, message: "It is being sent right now; try again in a minute" };
   if (fulfillment.status === "SHIPPED" || fulfillment.status === "DELIVERED") return { ok: false, status: fulfillment.status, message: "It has already shipped and can no longer be cancelled" };
   if (!fulfillment.providerOrderId) {
@@ -662,6 +715,8 @@ export async function cancelFulfillment(fulfillmentId: string): Promise<SubmitRe
 export async function syncFulfillment(fulfillmentId: string): Promise<SubmitResult> {
   const fulfillment = await prisma.podFulfillment.findUnique({ where: { id: fulfillmentId } });
   if (!fulfillment?.providerOrderId) return { ok: false, status: fulfillment?.status ?? "FAILED", message: "Not sent to the print shop yet" };
+  // Each environment only updates its own print orders (the database is shared with the other one).
+  if (fulfillment.mode !== podMode()) return { ok: false, status: fulfillment.status, message: `This is a ${fulfillment.mode === "live" ? "live" : "test (draft)"} print order; it is only updated by a ${fulfillment.mode === "live" ? "live" : "test"} environment` };
   try {
     const state = await podAdapter(fulfillment.provider).fetchStatus(fulfillment.providerOrderId, fulfillment.mode === "live" ? "live" : "draft");
     if (!state) {
@@ -686,6 +741,7 @@ async function editableItem(itemId: string) {
   const item = await prisma.orderItem.findUniqueOrThrow({ where: { id: itemId } });
   if (!item.podFulfillmentId) throw new Error("This item has no print order");
   const fulfillment = await prisma.podFulfillment.findUniqueOrThrow({ where: { id: item.podFulfillmentId } });
+  if (fulfillment.mode !== podMode()) throw new Error(`This is a ${fulfillment.mode === "live" ? "live" : "test (draft)"} print order; its files can only be changed from a ${fulfillment.mode === "live" ? "live" : "test"} environment`);
   if (!NOT_SENT.includes(fulfillment.status)) throw new Error("The print order was already sent; files can no longer change");
   return { item, fulfillmentId: item.podFulfillmentId };
 }
@@ -752,8 +808,8 @@ export async function handlePaidOrder(orderId: string) {
   try {
     const fulfillments = await prepareFulfillments(orderId);
     if (!podAutoSubmit()) return;
-    // Different print shops are independent: send them in parallel.
-    await Promise.all(fulfillments.filter((item) => item.status === "READY").map((item) => submitFulfillment(item.id)));
+    // Different print shops are independent: send them in parallel (only print orders of this site's mode).
+    await Promise.all(fulfillments.filter((item) => item.status === "READY" && item.mode === podMode()).map((item) => submitFulfillment(item.id)));
   } catch (reason) {
     logPod("handling a paid order failed", { orderId, message: reason instanceof Error ? reason.message : String(reason) });
   }
@@ -784,7 +840,7 @@ const trackable = (): Prisma.PodFulfillmentWhereInput => ({
 
 export async function syncStaleFulfillments({ maxAgeMs = 5 * 60_000, limit = 12, budgetMs = 6_000, orderIds }: { maxAgeMs?: number; limit?: number; budgetMs?: number; orderIds?: string[] } = {}) {
   const stale = await prisma.podFulfillment.findMany({
-    where: { ...(orderIds ? { orderId: { in: orderIds } } : {}), AND: [trackable(), { OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: new Date(Date.now() - maxAgeMs) } }] }] },
+    where: { mode: podMode(), ...(orderIds ? { orderId: { in: orderIds } } : {}), AND: [trackable(), { OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: new Date(Date.now() - maxAgeMs) } }] }] },
     orderBy: { lastSyncedAt: { sort: "asc", nulls: "first" } },
     take: limit,
     select: { id: true },
@@ -797,15 +853,23 @@ export async function syncStaleFulfillments({ maxAgeMs = 5 * 60_000, limit = 12,
 
 // Periodic job (cron): prepares paid orders the payment hook missed, retries failed
 // submissions, recovers interrupted ones and refreshes tracking.
+// Paid orders of this site's payment environment that have no print orders yet (the cron prepares them; the
+// admin page lists them).
+export function unpreparedOrdersWhere(mode: PodMode): Prisma.OrderWhereInput {
+  return { status: { in: [...PAID_ORDER] }, createdAt: { gte: POD_ENABLED_SINCE }, fulfillments: { none: {} }, payments: { some: { status: "SUCCEEDED", raw: { path: ["environment"], equals: paymentEnvironmentFor(mode) } } } };
+}
+
 export async function runPodMaintenance({ budgetMs = 45_000 } = {}) {
   const deadline = Date.now() + budgetMs;
   const report = { prepared: 0, rerendered: 0, submitted: 0, retried: 0, recovered: 0, synced: 0 };
   const left = () => Date.now() < deadline;
+  // Every step below only concerns print orders of this site's mode (and orders paid in its environment).
+  const mode = podMode();
 
-  const unprepared = await prisma.order.findMany({ where: { status: { in: [...PAID_ORDER] }, createdAt: { gte: POD_ENABLED_SINCE }, fulfillments: { none: {} }, payments: { some: { status: "SUCCEEDED" } } }, select: { id: true }, take: 20, orderBy: { createdAt: "asc" } });
+  const unprepared = await prisma.order.findMany({ where: unpreparedOrdersWhere(mode), select: { id: true }, take: 20, orderBy: { createdAt: "asc" } });
   for (const order of unprepared) { if (!left()) break; await prepareFulfillments(order.id); report.prepared += 1; }
 
-  const stale = await prisma.podFulfillment.findMany({ where: { status: "SUBMITTING", updatedAt: { lt: new Date(Date.now() - 10 * 60_000) } }, take: 20 });
+  const stale = await prisma.podFulfillment.findMany({ where: { mode, status: "SUBMITTING", updatedAt: { lt: new Date(Date.now() - 10 * 60_000) } }, take: 20 });
   for (const fulfillment of stale) {
     if (!left()) break;
     const found = await podAdapter(fulfillment.provider).findByReference(fulfillment.reference, fulfillment.mode === "live" ? "live" : "draft").catch(() => null);
@@ -817,7 +881,7 @@ export async function runPodMaintenance({ budgetMs = 45_000 } = {}) {
   // Print files that could not be made (e.g. image storage briefly unavailable) are tried again, and
   // Prodigi card orders still waiting for a hand-made file (planned before card files were made
   // automatically) are planned again so their file is composed and they are sent.
-  const unrendered = await prisma.podFulfillment.findMany({ where: { status: "NEEDS_ATTENTION", updatedAt: { lt: new Date(Date.now() - 5 * 60_000) }, OR: [
+  const unrendered = await prisma.podFulfillment.findMany({ where: { mode, status: "NEEDS_ATTENTION", updatedAt: { lt: new Date(Date.now() - 5 * 60_000) }, OR: [
     { items: { some: { podIssues: { array_contains: [{ code: "print_file_render_failed" }] } } } },
     // A calendar PDF the print shop could not download (e.g. Cloudinary blocking PDF delivery until the
     // setting is turned on) is checked again, so it goes out once the link works.
@@ -830,14 +894,14 @@ export async function runPodMaintenance({ budgetMs = 45_000 } = {}) {
   ] }, select: { id: true }, take: 10 });
   for (const fulfillment of unrendered) { if (!left()) break; await refreshReadiness(fulfillment.id, { replan: true }); report.rerendered += 1; }
 
-  const due: PodFulfillment[] = await prisma.podFulfillment.findMany({ where: { OR: [{ status: "FAILED", nextAttemptAt: { lte: new Date() } }, ...(podAutoSubmit() ? [{ status: "READY" as const }] : [])] }, take: 20, orderBy: { updatedAt: "asc" } });
+  const due: PodFulfillment[] = await prisma.podFulfillment.findMany({ where: { mode, OR: [{ status: "FAILED", nextAttemptAt: { lte: new Date() } }, ...(podAutoSubmit() ? [{ status: "READY" as const }] : [])] }, take: 20, orderBy: { updatedAt: "asc" } });
   for (const fulfillment of due) {
     if (!left()) break;
     const result = await submitFulfillment(fulfillment.id);
     if (fulfillment.status === "FAILED") report.retried += 1; else if (result.ok) report.submitted += 1;
   }
 
-  const active = await prisma.podFulfillment.findMany({ where: { AND: [trackable(), { OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: new Date(Date.now() - 3 * 3_600_000) } }] }] }, take: 40, orderBy: { lastSyncedAt: { sort: "asc", nulls: "first" } } });
+  const active = await prisma.podFulfillment.findMany({ where: { mode, AND: [trackable(), { OR: [{ lastSyncedAt: null }, { lastSyncedAt: { lt: new Date(Date.now() - 3 * 3_600_000) } }] }] }, take: 40, orderBy: { lastSyncedAt: { sort: "asc", nulls: "first" } } });
   for (const fulfillment of active) { if (!left()) break; if ((await syncFulfillment(fulfillment.id)).ok) report.synced += 1; }
   return report;
 }
