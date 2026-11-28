@@ -5,6 +5,7 @@ import { PayPalError, approvalUrl, capturePayPalOrder, firstCapture, getPayPalOr
 import { prisma } from "./prisma";
 import { handlePaidOrderInBackground } from "@/lib/pod/fulfillment";
 import { sendOrderConfirmationInBackground } from "@/lib/server/order-email";
+import { paypalEnvironment } from "@/lib/server/payment-environment";
 
 export type PayPalResult =
   | { status: "paid" | "pending" | "cancelled" | "failed"; order: ReturnType<typeof serializeOrder>; message?: string }
@@ -43,7 +44,8 @@ async function applyPayPalOrder(payment: CustomerPayment, paypalOrder: PayPalOrd
   const order = payment.order;
   const capture = firstCapture(paypalOrder);
   const unit = paypalOrder.purchase_units?.[0];
-  const raw = { paypalOrderId: paypalOrder.id, paypalStatus: paypalOrder.status, captureId: capture?.id, captureStatus: capture?.status, captureReason: capture?.status_details?.reason } as Prisma.InputJsonValue;
+  // environment: the PayPal API (live / sandbox) the order was read from; print orders are only sent for payments of the site's own environment.
+  const raw = { paypalOrderId: paypalOrder.id, paypalStatus: paypalOrder.status, captureId: capture?.id, captureStatus: capture?.status, captureReason: capture?.status_details?.reason, environment: paypalEnvironment() } as Prisma.InputJsonValue;
   if (!capture) return result(payment, "pending");
   const matches = (unit?.custom_id || unit?.reference_id) === order.id && capture.amount.currency_code.toUpperCase() === order.currency.toUpperCase() && toCents(capture.amount.value) === order.totalCents;
   if (!matches) {

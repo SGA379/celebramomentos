@@ -44,7 +44,11 @@ describe("Printful and Gelato order problems", () => {
     expect(parseGelatoOrder({ id: "g", fulfillmentStatus: "delivered" })).toMatchObject({ status: "DELIVERED", problem: null });
   });
 
-  it("registers the Printful webhook for the order events we handle", async () => {
+  it("registers the Printful webhook for the order events we handle (production only)", async () => {
+    const blocked = fakeFetch([]);
+    await expect(registerPrintfulWebhook("https://shop.example/api/webhooks/printful?token=x", blocked.impl)).rejects.toThrow(/not the production site/);
+    expect(blocked.calls).toHaveLength(0);
+    Object.assign(process.env, { VERCEL_ENV: "production", POD_ORDER_MODE: "live" });
     const { impl, calls } = fakeFetch([{ status: 200, body: { result: { url: "https://shop.example/api/webhooks/printful?token=x", types: [...PRINTFUL_WEBHOOK_TYPES] } } }]);
     const result = await registerPrintfulWebhook("https://shop.example/api/webhooks/printful?token=x", impl);
     expect(calls[0].url).toBe("https://api.printful.com/webhooks");

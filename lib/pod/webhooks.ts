@@ -71,13 +71,16 @@ export async function handlePodWebhook(provider: PodProvider, request: Request) 
 
   const fulfillment = await prisma.podFulfillment.findFirst({
     where: { provider, OR: [...(target.providerOrderId ? [{ providerOrderId: target.providerOrderId }] : []), ...(target.reference ? [{ reference: target.reference }] : [])] },
-    select: { id: true, lastSyncedAt: true },
+    select: { id: true, lastSyncedAt: true, mode: true },
   });
   // Unknown orders are acknowledged so the shop stops retrying (e.g. orders placed outside this site).
   if (!fulfillment) {
     logPod("webhook for an unknown order", { provider, type: target.type, providerOrderId: target.providerOrderId, reference: target.reference });
     return NextResponse.json({ received: true, matched: false });
   }
+  // A print order of the other environment (local test orders share the database): acknowledged so the shop
+  // stops retrying, but nothing is read or changed here.
+  if (fulfillment.mode !== podMode()) return NextResponse.json({ received: true, matched: true, ignored: "other environment" });
   if (!verified && fulfillment.lastSyncedAt && Date.now() - fulfillment.lastSyncedAt.getTime() < UNVERIFIED_MIN_INTERVAL_MS) return NextResponse.json({ received: true, matched: true, throttled: true });
 
   if (target.eventId) {

@@ -30,6 +30,8 @@ const input = (mode: "draft" | "live", productRef = "M-MAG-FRI-3X2"): Submission
 });
 
 const saved = { ...process.env };
+// Creating, confirming or cancelling at Gelato / Printful only happens on the production deployment in live mode.
+const asProduction = () => Object.assign(process.env, { VERCEL_ENV: "production", POD_ORDER_MODE: "live" });
 beforeEach(() => {
   Object.assign(process.env, { PRODIGI_API_KEY: "live-key", PRODIGI_SANDBOX_API_KEY: "", GELATO_API_KEY: "gelato-key", PRINTFUL_PRIVATE_TOKEN: "pf-token", PRINTFUL_STORE_ID: "18975889", PRINTEERS_V1_TEST_API_KEY: "prt-test-key", PRINTEERS_V1_TEST_PARTNER_CODE: "TESTCODE", PRINTEERS_V1_API_KEY: "prt-live-key", PRINTEERS_V1_PARTNER_CODE: "LIVECODE", POD_WEBHOOK_SECRET: "s".repeat(32), NEXT_PUBLIC_APP_URL: "https://www.celebra-momentos.com" });
 });
@@ -110,14 +112,25 @@ describe("Gelato", () => {
     await expect(checkGelatoApi(impl)).resolves.toEqual({ state: "unavailable", detail: "Gelato returned an unexpected API response" });
   });
 
-  it("creates drafts in draft mode and real orders in live mode", async () => {
-    const { impl, calls } = fakeFetch([{ status: 200, body: { id: "g1", orderType: "draft", fulfillmentStatus: "draft" } }, { status: 200, body: { id: "g2", orderType: "order", fulfillmentStatus: "created" } }]);
-    await gelatoAdapter(impl).submit(input("draft", "wall_hanging_poster_x"));
+  it("outside production only validates the order with a quote (a dry run: nothing is created)", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: { quotes: [{ products: [{ itemReferenceId: "item1", price: 12.6, currency: "EUR" }] }] } }]);
+    const state = await gelatoAdapter(impl).submit(input("draft", "wall_hanging_poster_x"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://order.gelatoapis.com/v4/orders:quote");
+    expect(headersOf(calls[0]).get("X-API-KEY")).toBe("gelato-key");
+    expect(bodyOf(calls[0])).toMatchObject({ orderReferenceId: "CM-1-ABC-PRD", currency: "EUR", products: [{ productUid: "wall_hanging_poster_x", quantity: 2, files: [{ type: "default" }] }], recipient: { firstName: "Ana", lastName: "García López", country: "ES", postCode: "28001" } });
+    expect(state).toMatchObject({ providerOrderId: "dryrun_CM-1-ABC-PRD", status: "SUBMITTED", providerStatus: expect.stringContaining("dry run") });
+    // A quote Gelato refuses fails the dry run like a refused order would.
+    const refused = fakeFetch([{ status: 400, body: { message: "ProductUid is not supported" } }]);
+    await expect(gelatoAdapter(refused.impl).submit(input("draft", "wall_hanging_poster_bad"))).rejects.toMatchObject({ status: 400, retryable: false });
+  });
+
+  it("creates real orders on the production deployment in live mode", async () => {
+    asProduction();
+    const { impl, calls } = fakeFetch([{ status: 200, body: { id: "g2", orderType: "order", fulfillmentStatus: "created" } }]);
     await gelatoAdapter(impl).submit(input("live", "wall_hanging_poster_x"));
     expect(calls[0].url).toBe("https://order.gelatoapis.com/v4/orders");
-    expect(headersOf(calls[0]).get("X-API-KEY")).toBe("gelato-key");
-    expect(bodyOf(calls[0])).toMatchObject({ orderType: "draft", orderReferenceId: "CM-1-ABC-PRD", currency: "EUR", items: [{ productUid: "wall_hanging_poster_x", quantity: 2, files: [{ type: "default" }] }], shippingAddress: { firstName: "Ana", lastName: "García López", country: "ES", postCode: "28001" } });
-    expect(bodyOf(calls[1]).orderType).toBe("order");
+    expect(bodyOf(calls[0])).toMatchObject({ orderType: "order", orderReferenceId: "CM-1-ABC-PRD", currency: "EUR", items: [{ productUid: "wall_hanging_poster_x", quantity: 2, files: [{ type: "default" }] }], shippingAddress: { firstName: "Ana", lastName: "García López", country: "ES", postCode: "28001" } });
   });
 
   it("finds an order only by its exact reference", async () => {
@@ -135,17 +148,26 @@ describe("Gelato", () => {
 });
 
 describe("Printful", () => {
-  it("creates an unconfirmed order in draft mode with the store header", async () => {
-    const { impl, calls } = fakeFetch([{ status: 200, body: { result: { id: 77, external_id: "CM-1-ABC-PRD", status: "draft" } } }]);
+  it("outside production only validates the order with a cost estimate (a dry run: nothing is created)", async () => {
+    const { impl, calls } = fakeFetch([{ status: 200, body: { result: { costs: { currency: "EUR", total: 14.91 } } } }]);
     const state = await printfulAdapter(impl).submit(input("draft", "11051"));
-    expect(calls[0].url).toBe("https://api.printful.com/orders?confirm=false");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.printful.com/orders/estimate-costs");
     expect(headersOf(calls[0]).get("Authorization")).toBe("Bearer pf-token");
     expect(headersOf(calls[0]).get("X-PF-Store-Id")).toBe("18975889");
     expect(bodyOf(calls[0])).toMatchObject({ external_id: "CM-1-ABC-PRD", shipping: "STANDARD", items: [{ variant_id: 11051, quantity: 2, files: [{ type: "default" }] }], recipient: { country_code: "ES", zip: "28001" } });
-    expect(state).toMatchObject({ providerOrderId: "77", status: "SUBMITTED" });
+    expect(state).toMatchObject({ providerOrderId: "dryrun_CM-1-ABC-PRD", status: "SUBMITTED", raw: { dryRun: true, costs: { total: 14.91 } } });
+  });
+
+  it("creates and confirms a real order on the production deployment in live mode", async () => {
+    asProduction();
+    const { impl, calls } = fakeFetch([{ status: 200, body: { result: { id: 77, external_id: "CM-1-ABC-PRD", status: "pending" } } }]);
+    expect(await printfulAdapter(impl).submit(input("live", "11051"))).toMatchObject({ providerOrderId: "77", status: "SUBMITTED" });
+    expect(calls[0].url).toBe("https://api.printful.com/orders?confirm=true");
   });
 
   it("returns the existing order when the external id was already used", async () => {
+    asProduction();
     const { impl, calls } = fakeFetch([{ status: 409, body: { error: { message: "Order with this external_id already exists" } } }, { status: 200, body: { result: { id: 77, status: "pending" } } }]);
     expect(await printfulAdapter(impl).submit(input("live", "11051"))).toMatchObject({ providerOrderId: "77" });
     expect(calls[1].url).toBe("https://api.printful.com/orders/@CM-1-ABC-PRD");
@@ -315,6 +337,7 @@ describe("Gelato refusals", () => {
   });
 
   it("sends a calendar as one line with its 14-page PDF as the default file", async () => {
+    asProduction();
     const { impl, calls } = fakeFetch([{ status: 200, body: { id: "g1", orderType: "order", fulfillmentStatus: "created" } }]);
     const calendar = { ...input("live", "wall_calendar_unified_pf_a3-11x16-5-inch_pt_250-gsm-100lb-coated-silk_cl_4-4_bt_wire-with-hook-top_ct_none_prt_none_ver"), lines: [{ itemId: "cal", productRef: "wall_calendar_unified_pf_a3-11x16-5-inch_pt_250-gsm-100lb-coated-silk_cl_4-4_bt_wire-with-hook-top_ct_none_prt_none_ver", quantity: 1, name: "Calendario", pageCount: 14, files: [{ area: "default", url: "https://res.cloudinary.com/x/raw/upload/v2/cal.pdf", source: "design" as const }] }] };
     await gelatoAdapter(impl).submit(calendar);
@@ -323,6 +346,7 @@ describe("Gelato refusals", () => {
 });
 
 describe("Printful token and order submission", () => {
+  beforeEach(asProduction);
   it("surfaces a rejected token (the live failure: HTTP 401 'The access token provided is invalid') as a non-retryable error", async () => {
     const { impl, calls } = fakeFetch([{ status: 401, body: { code: 401, result: "The access token provided is invalid.", error: { reason: "Unauthorized", message: "The access token provided is invalid." } } }]);
     await expect(printfulAdapter(impl).submit(input("live", "11050"))).rejects.toMatchObject({ status: 401, retryable: false, message: "PRINTFUL answered HTTP 401: The access token provided is invalid." });

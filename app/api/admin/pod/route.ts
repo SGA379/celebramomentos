@@ -6,7 +6,7 @@ import { handleApiError, jsonError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
 import { itemCustomization } from "@/lib/server/orders";
 import { podAutoSubmit, podMode, webhookSecret } from "@/lib/pod/config";
-import { attachDesignPages, attachPrintFile, cancelFulfillment, confirmDraft, prepareFulfillments, readArtwork, readIssues, refreshReadiness, resendFulfillment, resetPrintFile, submitFulfillment, syncFulfillment, syncStaleFulfillments } from "@/lib/pod/fulfillment";
+import { attachDesignPages, attachPrintFile, cancelFulfillment, confirmDraft, prepareFulfillments, unpreparedOrdersWhere, readArtwork, readIssues, refreshReadiness, resendFulfillment, resetPrintFile, submitFulfillment, syncFulfillment, syncStaleFulfillments } from "@/lib/pod/fulfillment";
 import { podAdapter } from "@/lib/pod/providers";
 import { checkGelatoApi } from "@/lib/pod/providers/gelato";
 import { checkPrintfulApi } from "@/lib/pod/providers/printful";
@@ -68,7 +68,8 @@ export async function GET(request: NextRequest) {
     const [fulfillments, counts, unprepared] = await Promise.all([
       prisma.podFulfillment.findMany({ where, include: { order: { select: { id: true, number: true, email: true, status: true, totalCents: true, createdAt: true, shippingAddress: true } }, items: { select: { id: true, name: true, quantity: true, podProductRef: true, podArtwork: true, podIssues: true, personalization: true } } }, orderBy: { createdAt: "desc" }, take: 100 }),
       prisma.podFulfillment.groupBy({ by: ["status"], _count: { _all: true }, orderBy: { status: "asc" } }),
-      prisma.order.findMany({ where: { status: { in: ["PAID", "PROCESSING"] }, fulfillments: { none: {} }, payments: { some: { status: "SUCCEEDED" } } }, select: { id: true, number: true, email: true, createdAt: true, totalCents: true }, orderBy: { createdAt: "desc" }, take: 50 }),
+      // Only orders paid in this site's payment environment can get print orders (lib/pod/fulfillment.ts).
+      prisma.order.findMany({ where: unpreparedOrdersWhere(podMode()), select: { id: true, number: true, email: true, createdAt: true, totalCents: true }, orderBy: { createdAt: "desc" }, take: 50 }),
     ]);
     const mode = podMode();
     return NextResponse.json({

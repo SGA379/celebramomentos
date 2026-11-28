@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const state = { claims: [] as number[], background: 0, email: 0, discountIncrements: 0, status: "PENDING" };
+const state = { claims: [] as number[], background: 0, email: 0, discountIncrements: 0, status: "PENDING", livemode: false as boolean | undefined, paymentData: [] as Record<string, unknown>[] };
 const order = { id: "o1", number: "CM-1", email: "a@example.org", totalCents: 2250, currency: "eur", customerId: "c1", createdAt: new Date(), shippingAddress: {}, items: [{ name: "Tarjeta", quantity: 1 }], payments: [{ id: "p1", stripeCheckoutId: "cs_1" }], discountUsages: [{ discountId: "d1" }] };
 
 const tx = {
   order: { updateMany: async () => { const count = state.claims.shift() ?? 0; if (count) state.status = "PAID"; return { count }; } },
-  payment: { updateMany: async () => ({ count: 1 }) },
+  payment: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { state.paymentData.push(data); return { count: 1 }; } },
   discount: { update: async () => { state.discountIncrements += 1; } },
   cartLine: { deleteMany: async () => ({ count: 1 }) },
 };
@@ -15,14 +15,14 @@ vi.mock("@/lib/server/prisma", () => ({ prisma: {
   $transaction: async (work: (client: typeof tx) => unknown) => work(tx),
 } }));
 vi.mock("@/lib/server/auth", () => ({ requireCustomer: async () => ({ error: null, customer: { id: "c1" } }) }));
-vi.mock("@/lib/server/stripe", () => ({ stripe: { checkout: { sessions: { retrieve: async () => ({ id: "cs_1", metadata: { orderId: "o1" }, payment_status: "paid", amount_total: 2250, currency: "eur", status: "complete", payment_intent: "pi_1" }) } } } }));
+vi.mock("@/lib/server/stripe", () => ({ stripe: { checkout: { sessions: { retrieve: async () => ({ id: "cs_1", livemode: state.livemode, metadata: { orderId: "o1" }, payment_status: "paid", amount_total: 2250, currency: "eur", status: "complete", payment_intent: "pi_1" }) } } } }));
 vi.mock("@/lib/pod/fulfillment", () => ({ handlePaidOrderInBackground: () => { state.background += 1; } }));
 vi.mock("@/lib/server/order-email", () => ({ sendOrderConfirmationInBackground: () => { state.email += 1; } }));
 
 import { POST } from "@/app/api/checkout/confirm/route";
 const confirm = () => POST(new Request("https://shop.test/api/checkout/confirm", { method: "POST", body: JSON.stringify({ sessionId: "cs_1" }) }) as never);
 
-beforeEach(() => { state.claims = []; state.background = 0; state.email = 0; state.discountIncrements = 0; state.status = "PENDING"; });
+beforeEach(() => { state.claims = []; state.background = 0; state.email = 0; state.discountIncrements = 0; state.status = "PENDING"; state.livemode = false; state.paymentData = []; });
 
 describe("confirming a Stripe payment is safe to repeat and to race", () => {
   it("claims the order once: payment bookkeeping, print shops and the email happen exactly once", async () => {
@@ -46,5 +46,15 @@ describe("confirming a Stripe payment is safe to repeat and to race", () => {
     const body = await (await confirm()).json();
     expect(body.paid).toBe(true);
     expect(state.background).toBe(0); expect(state.discountIncrements).toBe(0);
+  });
+});
+
+describe("the payment records the environment Stripe reports", () => {
+  it("live for a live-mode session, test otherwise (never live by default)", async () => {
+    for (const [livemode, environment] of [[true, "live"], [false, "test"], [undefined, "test"]] as const) {
+      state.claims = [1]; state.status = "PENDING"; state.paymentData = []; state.livemode = livemode;
+      await confirm();
+      expect(state.paymentData[0]).toMatchObject({ status: "SUCCEEDED", raw: { sessionId: "cs_1", environment } });
+    }
   });
 });

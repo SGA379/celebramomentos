@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Database and status sync are mocked: these tests cover what the webhook handler and the adapters send.
-const db = vi.hoisted(() => ({ fulfillment: null as null | { id: string; lastSyncedAt: Date | null }, events: new Set<string>(), syncs: 0 }));
+const db = vi.hoisted(() => ({ fulfillment: null as null | { id: string; lastSyncedAt: Date | null; mode: string }, events: new Set<string>(), syncs: 0 }));
 vi.mock("@/lib/server/prisma", () => ({ prisma: {
   podFulfillment: { findFirst: async () => db.fulfillment },
   podWebhookEvent: {
@@ -27,7 +27,7 @@ function fakeFetch(responses: { status: number; body: unknown }[]) {
 const saved = { ...process.env };
 beforeEach(() => {
   Object.assign(process.env, { POD_WEBHOOK_SECRET: "s".repeat(32), PRODIGI_SANDBOX_API_KEY: "sb", GELATO_API_KEY: "g", PRINTFUL_PRIVATE_TOKEN: "pf", PRINTEERS_V1_TEST_API_KEY: "k", PRINTEERS_V1_TEST_PARTNER_CODE: "TESTCODE" });
-  db.fulfillment = { id: "f1", lastSyncedAt: null }; db.events.clear(); db.syncs = 0;
+  db.fulfillment = { id: "f1", lastSyncedAt: null, mode: "draft" }; db.events.clear(); db.syncs = 0;
 });
 afterEach(() => { process.env = { ...saved }; });
 
@@ -43,7 +43,7 @@ describe("webhooks registered without a token (Gelato / Prodigi dashboards)", ()
   });
 
   it("re-read an order at most once a minute", async () => {
-    db.fulfillment = { id: "f1", lastSyncedAt: new Date(Date.now() - 10_000) };
+    db.fulfillment = { id: "f1", lastSyncedAt: new Date(Date.now() - 10_000), mode: "draft" };
     expect(await (await post("", event("e2"))).json()).toMatchObject({ throttled: true });
     expect(db.syncs).toBe(0);
   });
@@ -51,7 +51,7 @@ describe("webhooks registered without a token (Gelato / Prodigi dashboards)", ()
   it("ignore orders that are not from this site and repeated events", async () => {
     db.fulfillment = null;
     expect(await (await post("", event("e3"))).json()).toMatchObject({ matched: false });
-    db.fulfillment = { id: "f1", lastSyncedAt: null };
+    db.fulfillment = { id: "f1", lastSyncedAt: null, mode: "draft" };
     await post("", event("e4"));
     expect(await (await post("", event("e4"))).json()).toMatchObject({ duplicate: true });
     expect(db.syncs).toBe(1);
@@ -59,7 +59,7 @@ describe("webhooks registered without a token (Gelato / Prodigi dashboards)", ()
 
   it("still refuse a wrong token, and never throttle the right one", async () => {
     expect((await post("?token=wrong", event("e5"))).status).toBe(401);
-    db.fulfillment = { id: "f1", lastSyncedAt: new Date() };
+    db.fulfillment = { id: "f1", lastSyncedAt: new Date(), mode: "draft" };
     expect(await (await post(`?token=${"s".repeat(32)}`, event("e6"))).json()).toMatchObject({ status: "SHIPPED" });
   });
 });
@@ -72,7 +72,11 @@ describe("cancelling at each print shop", () => {
     await expect(prodigiAdapter(impl).cancel("ord_1", "draft")).rejects.toThrow(/FailedToCancel/);
   });
 
+  // Cancelling changes the Gelato / Printful account: only the production deployment does it.
+  const asProduction = () => Object.assign(process.env, { VERCEL_ENV: "production", POD_ORDER_MODE: "live" });
+
   it("Gelato: deletes a draft, cancels a real order with :cancel", async () => {
+    asProduction();
     const draft = fakeFetch([{ status: 200, body: { id: "g1", orderType: "draft" } }, { status: 200, body: {} }]);
     expect(await gelatoAdapter(draft.impl).cancel("g1", "draft")).toMatchObject({ status: "CANCELLED", providerStatus: "draft deleted" });
     expect(draft.calls[1]).toMatchObject({ url: "https://order.gelatoapis.com/v4/orders/g1", init: { method: "DELETE" } });
@@ -82,6 +86,7 @@ describe("cancelling at each print shop", () => {
   });
 
   it("Printful: DELETE /orders/{id}", async () => {
+    asProduction();
     const { impl, calls } = fakeFetch([{ status: 200, body: { result: { id: 77, status: "canceled" } } }]);
     expect(await printfulAdapter(impl).cancel("77", "draft")).toMatchObject({ status: "CANCELLED" });
     expect(calls[0]).toMatchObject({ url: "https://api.printful.com/orders/77", init: { method: "DELETE" } });
@@ -91,5 +96,15 @@ describe("cancelling at each print shop", () => {
     const { impl, calls } = fakeFetch([{ status: 200, body: {} }, { status: 200, body: { reference: "TESTCODE-7", status: "closed", status_code: "canceled" } }]);
     expect(await printeersAdapter(impl).cancel("TESTCODE-7", "draft")).toMatchObject({ status: "CANCELLED" });
     expect(calls[0].url).toBe("https://api.test-printeers.com/orders/TESTCODE-7/cancel-all-lines");
+  });
+});
+
+describe("print orders of the other environment (shared database)", () => {
+  it("a webhook about one is acknowledged without reading or changing anything", async () => {
+    db.fulfillment = { id: "f1", lastSyncedAt: null, mode: "live" }; // this test site runs in draft mode
+    const body = await (await post(`?token=${"s".repeat(32)}`, event("evt-other"))).json();
+    expect(body).toMatchObject({ received: true, ignored: "other environment" });
+    expect(db.syncs).toBe(0);
+    expect(db.events.size).toBe(0);
   });
 });
